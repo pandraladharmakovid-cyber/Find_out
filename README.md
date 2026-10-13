@@ -59,6 +59,18 @@ The repository is configured as a Vercel monorepo: Vercel builds the Vite fronte
 
 Do not set `VITE_API_URL` for Vercel; the frontend automatically calls the API on the same deployment origin. Keep local `.env` files out of Git and never put backend credentials in `VITE_*` variables. The prototype's write APIs do not provide user authentication, so use a database dedicated to this deployment and do not store sensitive personal data.
 
+## Deploy the API to Render
+
+The `render.yaml` Blueprint deploys the Express API as a Node web service from the `backend` directory. It uses the existing PostgreSQL database; it does not create, migrate destructively, or delete a database.
+
+1. Push this repository to GitHub, then in Render choose **New + → Blueprint** and select this repository. Render reads the checked-in `render.yaml` and creates the `find-out-api` web service.
+2. During setup, provide `DATABASE_URL` using the hosted PostgreSQL connection string and `FRONTEND_URL` using the exact origin of the deployed Vercel frontend (for example, `https://your-app.vercel.app`, without a trailing slash). For more than one allowed frontend, use comma-separated origins. Do not paste secrets into Git or chat.
+3. Wait for Render to finish building and deploying. Its health check is `/api/health`; the service initializes the schema during startup. Copy the service URL from Render after deployment.
+4. In Vercel, open the frontend project's **Settings → Environment Variables** and set `VITE_API_URL` to the Render service URL followed by `/api` (for example, `https://find-out-api.onrender.com/api`). Redeploy the frontend so Vite includes the new API URL in its build.
+5. Verify the API by opening `<Render service URL>/api/health`, then use the Vercel frontend and confirm its monitoring and profile requests reach the Render API.
+
+The Render Blueprint enables PostgreSQL TLS with `DATABASE_SSL=true`. The free web-service plan may sleep when idle and take longer to respond on its first request. Rotate any credentials previously exposed in chat before adding them to Render; optional source integrations can be configured later in the Render service's environment settings.
+
 ## 📌 Project Status
 
 Under development. Features and integrations should be considered complete only after implementation and testing.
