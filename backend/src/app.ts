@@ -14,7 +14,10 @@ export const app: Express = express();
 
 // Standard middleware
 const allowedOrigins = new Set(
-  config.FRONTEND_URL.split(",").map((origin) => origin.trim()).filter(Boolean),
+  config.FRONTEND_URL
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/+$/, ""))
+    .filter(Boolean),
 );
 
 app.use(

@@ -5,7 +5,7 @@ describe("CORS configuration", () => {
   beforeAll(() => {
     vi.stubEnv(
       "FRONTEND_URL",
-      "https://findout-henna.vercel.app,https://findout-preview.vercel.app",
+      "https://findout-henna.vercel.app/,https://findout-preview.vercel.app/",
     );
     vi.resetModules();
   });
