@@ -1,0 +1,14 @@
+{
+  "name": "find-out-root",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "test": "npm --prefix backend test",
+    "typecheck": "npm --prefix frontend run typecheck",
+    "build:backend": "npm --prefix backend run build",
+    "build:frontend": "npm --prefix frontend run build",
+    "build": "npm run build:backend && npm run typecheck && npm run build:frontend"
+  }
+}
