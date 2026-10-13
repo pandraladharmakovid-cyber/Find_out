@@ -201,6 +201,19 @@ ALTER TABLE risk_assessments
   ADD COLUMN IF NOT EXISTS primary_reasons TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE risk_assessments
   ADD COLUMN IF NOT EXISTS assessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'risk_assessments'
+      AND column_name = 'finding_id'
+      AND is_nullable = 'NO'
+  ) THEN
+    ALTER TABLE risk_assessments ALTER COLUMN finding_id DROP NOT NULL;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS official_asset_matches (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
