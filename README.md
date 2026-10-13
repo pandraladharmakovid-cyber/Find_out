@@ -45,6 +45,20 @@ The goal of Find_out is to help individuals and organizations identify potential
 
 Find_out focuses on brand impersonation detection, social media monitoring, mobile application monitoring, and evidence-backed threat investigation.
 
+## Deploy to Vercel
+
+The repository is configured as a Vercel monorepo: Vercel builds the Vite frontend from `frontend/dist` and serves the Express API through a serverless function under `/api/*`.
+
+1. Create a hosted PostgreSQL database. Use its pooled connection URL for serverless deployments when available.
+2. Import this GitHub repository into Vercel and leave the project root as `./`. The checked-in `vercel.json` provides the install, build, and output-directory settings.
+3. Add these Vercel environment variables for Production (and Preview if needed):
+   - `DATABASE_URL`: the hosted PostgreSQL connection URL.
+   - `DATABASE_SSL`: `true` if required by the database provider; otherwise `false`.
+   - Optional source credentials: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`, `YOUTUBE_API_KEY`, `GOOGLE_SAFE_BROWSING_API_KEY`, `URLHAUS_AUTH_KEY`, and `GEMINI_API_KEY`.
+4. Deploy. On the first API request, the backend applies its schema to the configured database. Visit the deployed site and check `/api/health`.
+
+Do not set `VITE_API_URL` for Vercel; the frontend automatically calls the API on the same deployment origin. Keep local `.env` files out of Git and never put backend credentials in `VITE_*` variables. The prototype's write APIs do not provide user authentication, so use a database dedicated to this deployment and do not store sensitive personal data.
+
 ## 📌 Project Status
 
 Under development. Features and integrations should be considered complete only after implementation and testing.

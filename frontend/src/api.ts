@@ -10,6 +10,9 @@ function resolveDefaultApiBase(): string {
     if (pathname.includes('/proxy/')) {
       return `${origin}/proxy/5000/api`;
     }
+    if (import.meta.env.PROD) {
+      return `${origin}/api`;
+    }
   }
   return 'http://localhost:5000/api';
 }
