@@ -5,7 +5,7 @@ describe("CORS configuration", () => {
   beforeAll(() => {
     vi.stubEnv(
       "FRONTEND_URL",
-      "https://find-out.vercel.app,https://find-out-preview.vercel.app",
+      "https://findout-henna.vercel.app,https://findout-preview.vercel.app",
     );
     vi.resetModules();
   });
@@ -18,11 +18,11 @@ describe("CORS configuration", () => {
     const { app } = await import("../src/app");
     const response = await request(app)
       .options("/api/health")
-      .set("Origin", "https://find-out.vercel.app")
+      .set("Origin", "https://findout-henna.vercel.app")
       .set("Access-Control-Request-Method", "GET");
 
     expect(response.headers["access-control-allow-origin"]).toBe(
-      "https://find-out.vercel.app",
+      "https://findout-henna.vercel.app",
     );
     expect(response.headers["access-control-allow-credentials"]).toBe("true");
   });

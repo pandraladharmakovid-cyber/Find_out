@@ -17,4 +17,4 @@ services:
       - key: DATABASE_SSL
         value: "false"
       - key: FRONTEND_URL
-        sync: false
+        value: https://findout-henna.vercel.app
