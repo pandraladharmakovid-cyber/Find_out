@@ -203,6 +203,8 @@ ALTER TABLE risk_assessments
   ADD COLUMN IF NOT EXISTS assessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE risk_assessments
   ADD COLUMN IF NOT EXISTS overall_score NUMERIC(5, 2);
+ALTER TABLE risk_assessments
+  ADD COLUMN IF NOT EXISTS severity VARCHAR(20);
 DO $$
 BEGIN
   IF EXISTS (
