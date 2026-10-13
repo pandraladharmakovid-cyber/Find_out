@@ -256,8 +256,9 @@ export class MonitoringService {
       );
     }
     await query(
-      `INSERT INTO risk_assessments (candidate_id, risk_level, risk_score, confidence_score, primary_reasons, status)
-       VALUES ($1, $2, $3, $4, $5, $6);`,
+      `INSERT INTO risk_assessments (
+        candidate_id, risk_level, risk_score, overall_score, confidence_score, primary_reasons, status
+      ) VALUES ($1, $2, $3, $3, $4, $5, $6);`,
       [
         id,
         candidate.excluded ? "BENIGN" : candidate.riskScore >= 75 ? "HIGH" : candidate.riskScore >= 40 ? "MEDIUM" : "LOW",

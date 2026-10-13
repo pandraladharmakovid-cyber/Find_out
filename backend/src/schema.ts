@@ -201,6 +201,8 @@ ALTER TABLE risk_assessments
   ADD COLUMN IF NOT EXISTS primary_reasons TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE risk_assessments
   ADD COLUMN IF NOT EXISTS assessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE risk_assessments
+  ADD COLUMN IF NOT EXISTS overall_score NUMERIC(5, 2);
 DO $$
 BEGIN
   IF EXISTS (
