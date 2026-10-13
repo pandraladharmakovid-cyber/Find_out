@@ -1,8 +1,16 @@
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 import { config } from "./config";
 
+function applyDatabaseSslMode(connectionString: string, ssl: boolean): string {
+  if (!connectionString) return connectionString;
+
+  const url = new URL(connectionString);
+  url.searchParams.set("sslmode", ssl ? "require" : "disable");
+  return url.toString();
+}
+
 export const pool = new Pool({
-  connectionString: config.DATABASE_URL,
+  connectionString: applyDatabaseSslMode(config.DATABASE_URL, config.DATABASE_SSL),
   ssl: config.DATABASE_SSL ? { rejectUnauthorized: true } : false,
   connectionTimeoutMillis: 10_000,
   idleTimeoutMillis: 30_000,

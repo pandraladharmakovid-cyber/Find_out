@@ -69,7 +69,7 @@ The `render.yaml` Blueprint deploys the Express API as a Node web service from t
 4. In Vercel, open the frontend project's **Settings → Environment Variables** and set `VITE_API_URL` to the Render service URL followed by `/api` (for example, `https://find-out-api.onrender.com/api`). Redeploy the frontend so Vite includes the new API URL in its build.
 5. Verify the API by opening `<Render service URL>/api/health`, then use the Vercel frontend and confirm its monitoring and profile requests reach the Render API.
 
-The Render Blueprint enables PostgreSQL TLS with `DATABASE_SSL=true`. The free web-service plan may sleep when idle and take longer to respond on its first request. Rotate any credentials previously exposed in chat before adding them to Render; optional source integrations can be configured later in the Render service's environment settings.
+The Render Blueprint defaults `DATABASE_SSL` to `false` for compatibility with database endpoints that do not support TLS; database traffic is then unencrypted in transit. Use a TLS-enabled database endpoint and set `DATABASE_SSL=true` whenever possible. This setting overrides any `sslmode` query parameter in `DATABASE_URL`. The free web-service plan may sleep when idle and take longer to respond on its first request. Rotate any credentials previously exposed in chat before adding them to Render; optional source integrations can be configured later in the Render service's environment settings.
 
 ## 📌 Project Status
 

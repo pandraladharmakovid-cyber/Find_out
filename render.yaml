@@ -15,6 +15,6 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: DATABASE_SSL
-        value: "true"
+        value: "false"
       - key: FRONTEND_URL
         sync: false
