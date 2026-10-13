@@ -11,7 +11,7 @@ function resolveDefaultApiBase(): string {
       return `${origin}/proxy/5000/api`;
     }
     if (import.meta.env.PROD) {
-      return `${origin}/api`;
+      return 'https://find-out-api.onrender.com/api';
     }
   }
   return 'http://localhost:5000/api';

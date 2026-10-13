@@ -47,17 +47,13 @@ Find_out focuses on brand impersonation detection, social media monitoring, mobi
 
 ## Deploy to Vercel
 
-The repository is configured as a Vercel monorepo: Vercel builds the Vite frontend from `frontend/dist` and serves the Express API through a serverless function under `/api/*`.
+Vercel hosts the Vite frontend from `frontend/dist`; the Express API is hosted separately on Render.
 
-1. Create a hosted PostgreSQL database. Use its pooled connection URL for serverless deployments when available.
-2. Import this GitHub repository into Vercel and leave the project root as `./`. The checked-in `vercel.json` provides the install, build, and output-directory settings.
-3. Add these Vercel environment variables for Production (and Preview if needed):
-   - `DATABASE_URL`: the hosted PostgreSQL connection URL.
-   - `DATABASE_SSL`: `true` if required by the database provider; otherwise `false`.
-   - Optional source credentials: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`, `YOUTUBE_API_KEY`, `GOOGLE_SAFE_BROWSING_API_KEY`, `URLHAUS_AUTH_KEY`, and `GEMINI_API_KEY`.
-4. Deploy. On the first API request, the backend applies its schema to the configured database. Visit the deployed site and check `/api/health`.
+1. Import this GitHub repository into Vercel and leave the project root as `./`. The checked-in `vercel.json` provides the install, build, and output-directory settings.
+2. Production frontend builds call `https://find-out-api.onrender.com/api` by default. For a different backend, set `VITE_API_URL` to its `/api` URL in Vercel and redeploy.
+3. Keep the PostgreSQL URL and all backend integration keys in Render environment settings, not Vercel. Verify the API at `https://find-out-api.onrender.com/api/health`.
 
-Do not set `VITE_API_URL` for Vercel; the frontend automatically calls the API on the same deployment origin. Keep local `.env` files out of Git and never put backend credentials in `VITE_*` variables. The prototype's write APIs do not provide user authentication, so use a database dedicated to this deployment and do not store sensitive personal data.
+Keep local `.env` files out of Git and never put backend credentials in `VITE_*` variables. The prototype's write APIs do not provide user authentication, so use a database dedicated to this deployment and do not store sensitive personal data.
 
 ## Deploy the API to Render
 
@@ -66,7 +62,7 @@ The `render.yaml` Blueprint deploys the Express API as a Node web service from t
 1. Push this repository to GitHub, then in Render choose **New + → Blueprint** and select this repository. Render reads the checked-in `render.yaml` and creates the `find-out-api` web service.
 2. During setup, provide `DATABASE_URL` using the hosted PostgreSQL connection string. The Blueprint restricts CORS to `https://findout-henna.vercel.app`; update `FRONTEND_URL` in `render.yaml` if you change the Vercel frontend domain. For more than one allowed frontend, use comma-separated origins. Do not paste secrets into Git or chat.
 3. Wait for Render to finish building and deploying. Its health check is `/api/health`; the service initializes the schema during startup. Copy the service URL from Render after deployment.
-4. In Vercel, open the frontend project's **Settings → Environment Variables** and set `VITE_API_URL` to the Render service URL followed by `/api` (for example, `https://find-out-api.onrender.com/api`). Redeploy the frontend so Vite includes the new API URL in its build.
+4. The Vercel production frontend defaults to the Render service URL followed by `/api`. Set `VITE_API_URL` in Vercel only if you use a different backend, then redeploy the frontend.
 5. Verify the API by opening `<Render service URL>/api/health`, then use the Vercel frontend and confirm its monitoring and profile requests reach the Render API.
 
 The Render Blueprint defaults `DATABASE_SSL` to `false` for compatibility with database endpoints that do not support TLS; database traffic is then unencrypted in transit. Use a TLS-enabled database endpoint and set `DATABASE_SSL=true` whenever possible. This setting overrides any `sslmode` query parameter in `DATABASE_URL`. The free web-service plan may sleep when idle and take longer to respond on its first request. Rotate any credentials previously exposed in chat before adding them to Render; optional source integrations can be configured later in the Render service's environment settings.
