@@ -6,11 +6,10 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   databaseUrl: process.env.DATABASE_URL || '',
 
-  // Reddit integration
-  reddit: {
-    clientId: process.env.REDDIT_CLIENT_ID || 'public_mode',
-    clientSecret: process.env.REDDIT_CLIENT_SECRET || 'public_mode',
-    userAgent: process.env.REDDIT_USER_AGENT || 'FindOut-DRP-Scanner/1.0',
+  // Bluesky integration
+  bluesky: {
+    handle: process.env.BLUESKY_HANDLE || '',
+    appPassword: process.env.BLUESKY_APP_PASSWORD || '',
   },
 
   // YouTube integration

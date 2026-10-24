@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend — build, 157 tests, 28 e2e checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Type-check and compile
+        working-directory: backend
+        run: npm run build
+
+      - name: Unit / integration tests (real PostgreSQL via PGlite)
+        working-directory: backend
+        run: npx vitest run --root ..
+
+      - name: End-to-end HTTP harness
+        working-directory: backend
+        run: npm run e2e
+
+  frontend:
+    name: Frontend — typecheck and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Type-check
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Production build
+        working-directory: frontend
+        env:
+          VITE_API_URL: /api
+        run: npm run build
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  smoke:
+    name: End-to-end UI smoke (jsdom against the real API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefix backend
+          npm ci --prefix frontend
+
+      - name: Build backend and both frontend bundles
+        run: |
+          npm --prefix backend run build
+          cd frontend
+          VITE_API_URL=/api npx vite build
+          npx vite build --config vite.smoke.config.mts
+
+      - name: Start the demo server
+        working-directory: backend
+        env:
+          PORT: "5000"
+          JSDOM_PATH: ${{ github.workspace }}/frontend/node_modules/jsdom
+        run: |
+          node scripts/demo-server.cjs > /tmp/demo.log 2>&1 &
+          for i in $(seq 1 45); do
+            if curl -sf http://127.0.0.1:5000/health > /dev/null; then
+              echo "API is up after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:5000/health
+
+      - name: Run the UI smoke checks
+        working-directory: frontend
+        env:
+          JSDOM_PATH: ${{ github.workspace }}/frontend/node_modules/jsdom
+        run: node scripts/ui-smoke.cjs http://127.0.0.1:5000
+
+      - name: Show demo server log on failure
+        if: failure()
+        run: tail -50 /tmp/demo.log

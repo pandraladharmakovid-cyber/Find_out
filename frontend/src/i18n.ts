@@ -1,10 +1,11 @@
-
 import { useCallback, useState } from 'react';
 import en from './locales/en.json';
 import hi from './locales/hi.json';
 import te from './locales/te.json';
 
 export type Language = 'en' | 'hi' | 'te';
+export type TranslateParams = Record<string, string | number>;
+export type Translator = (key: string, params?: TranslateParams) => string;
 type TranslationDictionary = Record<string, any>;
 
 const translations: Record<Language, TranslationDictionary> = {
@@ -42,13 +43,24 @@ function lookup(
   }, dictionary);
 }
 
-function createTranslator(language: Language) {
-  return (key: string): string => {
+function interpolate(text: string, params?: TranslateParams): string {
+  if (!params) return text;
+  return text.replace(/\{(\w+)\}/g, (match, name: string) => {
+    const value = params[name];
+    return value === undefined ? match : String(value);
+  });
+}
+
+export function createTranslator(language: Language): Translator {
+  return (key: string, params?: TranslateParams): string => {
     const translated = lookup(translations[language], key);
-    if (typeof translated === 'string') return translated;
+
+    if (typeof translated === 'string') {
+      return interpolate(translated, params);
+    }
 
     const fallback = lookup(translations.en, key);
-    return typeof fallback === 'string' ? fallback : key;
+    return typeof fallback === 'string' ? interpolate(fallback, params) : key;
   };
 }
 

@@ -21,11 +21,11 @@ CREATE TABLE IF NOT EXISTS brand_assets (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
     asset_type VARCHAR(50) NOT NULL CHECK (asset_type IN ('SOCIAL_ACCOUNT', 'MOBILE_APP', 'DOMAIN', 'LOGO')),
-    platform VARCHAR(50) NOT NULL, -- 'REDDIT', 'YOUTUBE', 'PLAY_STORE', 'APP_STORE', 'WEB'
+    platform VARCHAR(50) NOT NULL, -- 'BLUESKY', 'YOUTUBE', 'PLAY_STORE', 'APP_STORE', 'WEB'
     identifier VARCHAR(255) NOT NULL, -- username, package_name/app_id, domain
     official_url TEXT NOT NULL,
     publisher_name VARCHAR(255),
-    is_verified BOOLEAN DEFAULT TRUE,
+    is_verified BOOLEAN DEFAULT FALSE, -- Legacy table: never trust submission alone
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT unique_brand_asset UNIQUE (brand_id, platform, identifier)
 );

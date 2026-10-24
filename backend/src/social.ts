@@ -1,4 +1,4 @@
-import { redditClient, type RedditSearchResult } from "./integrations/reddit.client";
+import { blueskyClient, type BlueskySearchResult } from "./integrations/bluesky.client";
 import { youtubeClient, type YouTubeSearchResult } from "./integrations/youtube.client";
 import { evidenceCollectorService, type NormalizedEvidenceItem } from "./evidence";
 import { logger } from "./utils/logger";
@@ -10,7 +10,7 @@ export interface SocialMonitoringQuery {
 }
 
 export interface ImpersonationSignal {
-  platform: "reddit" | "youtube";
+  platform: "bluesky" | "youtube";
   signalType: "unauthorized_giveaway" | "phishing_lure" | "credential_harvesting" | "negative_community_alert";
   confidence: number;
   snippet: string;
@@ -25,12 +25,12 @@ export interface SocialScanResult {
   overallThreatScore: number;
   signals: ImpersonationSignal[];
   sources: Array<{
-    source: "reddit" | "youtube";
+    source: "bluesky" | "youtube";
     status: "available" | "unavailable";
     error?: string;
     candidatesFound: number;
   }>;
-  redditData: RedditSearchResult;
+  blueskyData: BlueskySearchResult;
   youtubeData: YouTubeSearchResult;
 }
 
@@ -44,44 +44,45 @@ export class SocialMonitoringService {
       domain: query.associatedDomain,
     });
 
-    const searchQuery = query.associatedDomain 
+    const searchQuery = query.associatedDomain
       ? `"${query.brandName}" OR "${query.associatedDomain}"`
       : `"${query.brandName}"`;
 
-    // 1. Concurrently query Reddit and YouTube adapters
-    const [redditData, youtubeData] = await Promise.all([
-      redditClient.searchDiscussions(searchQuery, query.investigationId),
+    // Concurrently query Bluesky and YouTube adapters.
+    const [blueskyData, youtubeData] = await Promise.all([
+      blueskyClient.searchDiscussions(searchQuery, query.investigationId),
       youtubeClient.searchVideos(searchQuery, query.investigationId),
     ]);
 
     const signals: ImpersonationSignal[] = [];
 
-    // 2. Analyze Reddit findings for brand impersonation and community reports
-    for (const post of redditData.posts) {
-      const text = `${post.title} ${post.selftext}`.toLowerCase();
-      
+    // Analyze Bluesky findings for brand impersonation and community reports.
+    for (const post of blueskyData.posts) {
+      const text = post.text.toLowerCase();
+      const snippet = post.text.slice(0, 280);
+
       if (text.includes("fake") || text.includes("scam") || text.includes("phishing")) {
         signals.push({
-          platform: "reddit",
+          platform: "bluesky",
           signalType: "negative_community_alert",
           confidence: 80,
-          snippet: post.title,
+          snippet,
           url: post.permalink,
         });
       }
 
       if (text.includes("giveaway") || text.includes("free bonus") || text.includes("airdrop")) {
         signals.push({
-          platform: "reddit",
+          platform: "bluesky",
           signalType: "unauthorized_giveaway",
           confidence: 75,
-          snippet: post.title,
+          snippet,
           url: post.permalink,
         });
       }
     }
 
-    // 3. Analyze YouTube findings
+    // Analyze YouTube findings without changing the existing provider behavior.
     for (const video of youtubeData.videos) {
       const text = `${video.title} ${video.description}`.toLowerCase();
 
@@ -106,18 +107,18 @@ export class SocialMonitoringService {
       }
     }
 
-    // 4. Calculate Threat Score (0 - 100)
+    // Preserve the existing transparent threat-score calculation.
     let overallThreatScore = 0;
     if (signals.length > 0) {
       const baseWeight = Math.min(60, signals.length * 15);
-      const scamBonus = (redditData.hasScamSignals ? 20 : 0) + (youtubeData.hasScamSignals ? 20 : 0);
+      const scamBonus = (blueskyData.hasScamSignals ? 20 : 0) + (youtubeData.hasScamSignals ? 20 : 0);
       overallThreatScore = Math.min(100, baseWeight + scamBonus);
     }
 
-    // 5. If an investigation is provided, pipe the normalized findings to evidence storage
+    // If an investigation is provided, pipe normalized findings to evidence storage.
     if (query.investigationId) {
       const normalizedItems: NormalizedEvidenceItem[] = evidenceCollectorService.normalizeSignals({
-        redditResult: redditData,
+        blueskyResult: blueskyData,
         youtubeResult: youtubeData,
       });
 
@@ -129,20 +130,20 @@ export class SocialMonitoringService {
     return {
       brandName: query.brandName,
       scannedAt: new Date().toISOString(),
-      totalFindings: redditData.totalFound + youtubeData.totalFound,
+      totalFindings: blueskyData.totalFound + youtubeData.totalFound,
       impersonationDetected: signals.length > 0,
       overallThreatScore,
       signals,
       sources: [
         {
-          source: "reddit",
-          status: redditData.rawPayload.error || redditData.rawPayload.skipped ? "unavailable" : "available",
-          ...(typeof redditData.rawPayload.error === "string"
-            ? { error: redditData.rawPayload.error }
-            : typeof redditData.rawPayload.reason === "string"
-              ? { error: redditData.rawPayload.reason }
+          source: "bluesky",
+          status: blueskyData.rawPayload.sourceStatus === "available" ? "available" : "unavailable",
+          ...(typeof blueskyData.rawPayload.error === "string"
+            ? { error: blueskyData.rawPayload.error }
+            : typeof blueskyData.rawPayload.reason === "string"
+              ? { error: blueskyData.rawPayload.reason }
               : {}),
-          candidatesFound: redditData.totalFound,
+          candidatesFound: blueskyData.totalFound,
         },
         {
           source: "youtube",
@@ -155,7 +156,7 @@ export class SocialMonitoringService {
           candidatesFound: youtubeData.totalFound,
         },
       ],
-      redditData,
+      blueskyData,
       youtubeData,
     };
   }

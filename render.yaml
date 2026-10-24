@@ -18,3 +18,39 @@ services:
         value: "false"
       - key: FRONTEND_URL
         value: https://findout-henna.vercel.app
+      # ---- AI agent (dashboard copilot) ----
+      # sync: false makes Render prompt for the value instead of storing it in
+      # the repository. Paste your own key in the Render dashboard.
+      - key: OPENAI_BASE_URL
+        value: https://api.aicredits.in/v1
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: anthropic/claude-sonnet-4.5
+      - key: OPENAI_FALLBACK_MODELS
+        value: anthropic/claude-sonnet-4.6,openai/gpt-4o-mini,openai/gpt-4.1-mini
+      - key: AI_AGENT_ENABLED
+        value: "true"
+      # ---- Optional sources. Leave blank; each one reports not_configured
+      #      instead of returning a false "clean" result. ----
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: URLHAUS_AUTH_KEY
+        sync: false
+      - key: GOOGLE_SAFE_BROWSING_API_KEY
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: BLUESKY_HANDLE
+        sync: false
+      - key: BLUESKY_APP_PASSWORD
+        sync: false
+      # ---- Complaint delivery (optional) ----
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: COMPLAINT_FROM_EMAIL
+        sync: false

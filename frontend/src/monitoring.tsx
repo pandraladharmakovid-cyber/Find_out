@@ -4,6 +4,7 @@ import {
   RefreshCw, Radar, Search, Share2, Smartphone, ShieldAlert,
 } from 'lucide-react';
 import { apiRequest } from './api';
+import type { Translator } from './i18n';
 
 type Brand = {
   id: string;
@@ -43,6 +44,10 @@ type SourceStatus = {
   error?: string;
 };
 
+export function filterCurrentSourceStatuses(sources: SourceStatus[]): SourceStatus[] {
+  return sources.filter((source) => source.source.toLowerCase() !== 'reddit');
+}
+
 type MonitoringResults = {
   candidates: Candidate[];
   run?: {
@@ -53,7 +58,7 @@ type MonitoringResults = {
 };
 
 type Props = {
-  t: any;
+  t: Translator;
   onDeepInspect?: (target: string) => void;
 };
 
@@ -87,6 +92,7 @@ export const MonitoringView: React.FC<Props> = ({ t, onDeepInspect }) => {
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [showHistoricalRunNotice, setShowHistoricalRunNotice] = useState(false);
 
   const loadBrands = useCallback(async () => {
     setLoading(true);
@@ -117,13 +123,18 @@ export const MonitoringView: React.FC<Props> = ({ t, onDeepInspect }) => {
     setError('');
     try {
       const response = await apiRequest<{ data?: MonitoringResults }>(
-        `/monitoring/results/${encodeURIComponent(brandId)}`,
+        `/monitoring/results/${encodeURIComponent(brandId)}?limit=200`,
+        { timeoutMs: 45000 },
       );
       if (!Array.isArray(response?.data?.candidates)) {
         throw new Error('The monitoring API returned an unexpected result.');
       }
       setCandidates(response.data.candidates);
-      setSources(response.data.run?.summary?.sourceStatuses ?? []);
+      const sourceStatuses = response.data.run?.summary?.sourceStatuses ?? [];
+      setSources(filterCurrentSourceStatuses(sourceStatuses));
+      setShowHistoricalRunNotice(
+        sourceStatuses.some((source) => source.source.toLowerCase() === 'reddit'),
+      );
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -151,15 +162,19 @@ export const MonitoringView: React.FC<Props> = ({ t, onDeepInspect }) => {
     setScanning(true);
     setError('');
     setNotice('');
+    setShowHistoricalRunNotice(false);
     try {
       const response = await apiRequest<{
         data?: { sourceStatuses?: SourceStatus[]; candidatesFound?: number; excludedOfficialAssets?: number };
       }>('/monitoring/scan', {
         method: 'POST',
         body: JSON.stringify({ brandId }),
+        // A full scan queries four external sources; the server bounds each one
+        // and returns partial results well inside this budget.
+        timeoutMs: 180000,
       });
       if (!response?.data) throw new Error('The server did not return a monitoring run.');
-      setSources(response.data.sourceStatuses ?? []);
+      setSources(filterCurrentSourceStatuses(response.data.sourceStatuses ?? []));
       await loadResults();
       setNotice(
         `Run complete: ${response.data.candidatesFound ?? 0} source result(s), ` +
@@ -182,8 +197,6 @@ export const MonitoringView: React.FC<Props> = ({ t, onDeepInspect }) => {
     return matchesType && searchText.includes(query.toLowerCase().trim());
   });
 
-  const monitoring = t?.monitoring || {};
-
   return (
     <main className="page-enter space-y-6">
       <header className="flex flex-col justify-between gap-4 border-b border-slate-800 pb-5 sm:flex-row sm:items-center">
@@ -193,10 +206,10 @@ export const MonitoringView: React.FC<Props> = ({ t, onDeepInspect }) => {
           </p>
           <h1 className="flex items-center gap-3 text-2xl font-bold text-white">
             <Radar className={scanning ? 'animate-spin text-cyan-400' : 'text-cyan-400'} />
-            {monitoring.title || 'Social & App Monitoring'}
+            {t('monitoring.title')}
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
-            Run evidence-based searches against configured public sources. A match is a lead for review, not proof of abuse.
+            {t('monitoring.subtitle')}
           </p>
         </div>
 
@@ -228,7 +241,7 @@ export const MonitoringView: React.FC<Props> = ({ t, onDeepInspect }) => {
             className="btn-primary"
           >
             <Radar size={16} className={scanning ? 'animate-pulse' : ''} />
-            {scanning ? (monitoring.scanning || 'Scanning…') : (monitoring.scanBtn || 'Start monitoring')}
+            {scanning ? t('monitoring.scanning') : t('monitoring.scanBtn')}
           </button>
         </div>
       </header>
@@ -241,6 +254,12 @@ export const MonitoringView: React.FC<Props> = ({ t, onDeepInspect }) => {
             <p className="mt-1 break-words">{error}</p>
             <p className="mt-2 text-rose-200/75">No new detection is claimed until the request succeeds.</p>
           </div>
+        </div>
+      )}
+
+      {showHistoricalRunNotice && (
+        <div role="status" className="rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-sm text-amber-200">
+          {t('monitoring.historicalRun')}
         </div>
       )}
 

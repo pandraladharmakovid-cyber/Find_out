@@ -1,4 +1,3 @@
-
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
@@ -17,6 +16,9 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { apiRequest } from './api';
+import { AgentChat } from './agent-chat';
+import { BrandLogo } from './brand-logo';
+import type { Translator } from './i18n';
 
 type Candidate = {
   id?: string | number;
@@ -35,12 +37,16 @@ type Candidate = {
 type Brand = {
   id: string | number;
   name: string;
+  website?: string | null;
+  primary_domain?: string | null;
+  logo_url?: string | null;
+  logo_image_url?: string | null;
   assets?: unknown[];
   official_assets?: unknown[];
 };
 
 type DashboardViewProps = {
-  t: any;
+  t: Translator;
   setActiveTab: (tab: string) => void;
 };
 
@@ -249,6 +255,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   return (
     <section className="page-enter space-y-6">
+      <AgentChat t={t} onNavigate={setActiveTab} />
+
       <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-blue-400">
@@ -256,11 +264,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Security operations overview
           </div>
           <h1 className="text-2xl font-bold text-white sm:text-3xl">
-            {t?.dashboard?.title ?? 'Threat intelligence dashboard'}
+            {t('dashboard.title')}
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
-            Review registered brand identities, monitoring discoveries, and
-            available risk signals in one place.
+            {t('dashboard.subtitle')}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -279,7 +286,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             className="btn-secondary inline-flex items-center gap-2"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
+            {t('common.refresh')}
           </button>
         </div>
       </header>
@@ -308,9 +315,54 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       )}
 
+      {!brandState.error && brands.length > 0 && (
+        <section className="surface-card p-4 sm:p-5">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-white">{t('dashboard.protectedBrands')}</h2>
+              <p className="mt-0.5 text-xs text-slate-500">
+                {t('dashboard.protectedBrandsHint')}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('brands')}
+              className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium text-blue-300 hover:text-blue-200"
+            >
+              {t('dashboard.manageBrands')} <ArrowRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="flex gap-3 overflow-x-auto pb-1">
+            {brands.slice(0, 12).map((brand) => (
+              <button
+                key={String(brand.id)}
+                type="button"
+                onClick={() => setActiveTab('brands')}
+                className="group flex min-w-[132px] flex-col items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-3 transition hover:border-blue-500/40 hover:bg-slate-900/80"
+                title={brand.primary_domain ?? brand.name}
+              >
+                <BrandLogo
+                  brandId={brand.id}
+                  domain={brand.primary_domain}
+                  name={brand.name}
+                  size={44}
+                  verified
+                />
+                <span className="max-w-[120px] truncate text-xs font-medium text-slate-200 group-hover:text-white">
+                  {brand.name}
+                </span>
+                <span className="max-w-[120px] truncate text-[10px] text-slate-500">
+                  {brand.primary_domain ?? 'no domain'}
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
-          title="Registered brands"
+          title={t('dashboard.registeredBrands')}
           value={brandState.error ? '—' : brands.length}
           description="Brand profiles returned by the API"
           icon={Building2}
@@ -319,7 +371,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           onClick={() => setActiveTab('brands')}
         />
         <MetricCard
-          title="Official assets"
+          title={t('dashboard.officialAssets')}
           value={brandState.error ? '—' : assetCount}
           description="Assets included in the returned brand records"
           icon={ShieldCheck}
@@ -328,7 +380,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           onClick={() => setActiveTab('brands')}
         />
         <MetricCard
-          title="Discovered candidates"
+          title={t('dashboard.candidates')}
           value={candidateState.error ? '—' : candidates.length}
           description="Monitoring candidates returned by the API"
           icon={Radar}
@@ -337,7 +389,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           onClick={() => setActiveTab('monitoring')}
         />
         <MetricCard
-          title="High / critical risk"
+          title={t('dashboard.highRisk')}
           value={candidateState.error ? '—' : highRiskCount}
           description="Candidates explicitly classified as high or critical"
           icon={ShieldAlert}
@@ -352,7 +404,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
             <div>
               <h2 className="text-lg font-semibold text-white">
-                Recent monitoring candidates
+                {t('dashboard.recentActivity')}
               </h2>
               <p className="mt-1 text-sm text-slate-500">
                 Latest records available from the monitoring API
@@ -455,7 +507,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
         <aside className="space-y-5">
           <section className="surface-card p-5 sm:p-6">
-            <h2 className="text-lg font-semibold text-white">Quick actions</h2>
+            <h2 className="text-lg font-semibold text-white">{t('dashboard.quickActions')}</h2>
             <p className="mt-1 text-sm text-slate-500">
               Jump to a workflow
             </p>

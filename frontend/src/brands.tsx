@@ -1,17 +1,20 @@
-
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Building2,
   CheckCircle2,
   CircleAlert,
   Globe,
+  Loader2,
   LoaderCircle,
   Plus,
+  Search,
   RefreshCw,
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { apiRequest } from './api';
+import { apiRequest, getApiBaseUrl } from './api';
+import { BrandLogo } from './brand-logo';
+import type { Translator } from './i18n';
 
 type OfficialAsset = {
   id: string | number;
@@ -23,6 +26,15 @@ type OfficialAsset = {
   value?: string;
   is_verified?: boolean;
   verified?: boolean;
+  verification_status?: 'PENDING_VERIFICATION' | 'VERIFIED' | 'VERIFIED_LEGACY' | 'REJECTED' | 'REVOKED';
+  verification_method?: string | null;
+  verification_evidence?: Record<string, unknown>;
+  verified_at?: string | null;
+  verified_by?: string | null;
+  revoked_at?: string | null;
+  revocation_reason?: string | null;
+  safety_status?: 'NOT_ASSESSED' | 'NO_THREAT_MATCH' | 'THREAT_DETECTED';
+  safety_evidence?: Record<string, unknown>;
 };
 
 type Brand = {
@@ -36,6 +48,10 @@ type Brand = {
   alternate_names?: string[] | null;
   assets?: OfficialAsset[];
   official_assets?: OfficialAsset[];
+  logo_url?: string | null;
+  logo_asset_url?: string | null;
+  logo_domain?: string | null;
+  logo_image_url?: string | null;
 };
 
 type BrandForm = {
@@ -52,7 +68,6 @@ type AssetForm = {
   identifier: string;
   url: string;
   publisher: string;
-  confirmOwnership: boolean;
   imageBase64: string;
   imageMime: string;
   imageFileName: string;
@@ -72,11 +87,55 @@ const emptyAssetForm: AssetForm = {
   identifier: '',
   url: '',
   publisher: '',
-  confirmOwnership: false,
   imageBase64: '',
   imageMime: '',
   imageFileName: '',
 };
+
+type DomainChallenge = {
+  assetId: string;
+  challengeId: string;
+  token: string;
+  method: 'DNS_TXT' | 'WELL_KNOWN';
+  expiresAt: string;
+  domain: string;
+  dnsName: string;
+  wellKnownUrl: string;
+  dnsValue: string;
+  fileContents: string;
+};
+
+function isDomainAsset(asset: OfficialAsset): boolean {
+  return ['domain', 'subdomain', 'website'].includes((asset.asset_type ?? '').toLowerCase());
+}
+
+function isTrustedAsset(asset: OfficialAsset): boolean {
+  const status = asset.verification_status ??
+    (asset.is_verified === true || asset.verified === true ? 'VERIFIED_LEGACY' : 'PENDING_VERIFICATION');
+  return (asset.is_verified === true || asset.verified === true) &&
+    ['VERIFIED', 'VERIFIED_LEGACY'].includes(status);
+}
+
+function verificationLabel(asset: OfficialAsset): string {
+  const status = asset.verification_status ??
+    (asset.is_verified === true || asset.verified === true ? 'VERIFIED_LEGACY' : 'PENDING_VERIFICATION');
+  switch (status) {
+    case 'VERIFIED': return 'Proof verified';
+    case 'VERIFIED_LEGACY': return 'Legacy verified · re-verify recommended';
+    case 'REJECTED': return 'Rejected · not trusted';
+    case 'REVOKED': return 'Revoked · not trusted';
+    default: return 'Pending · not trusted';
+  }
+}
+
+function safetyLabel(asset: OfficialAsset): string {
+  switch (asset.safety_status) {
+    case 'NO_THREAT_MATCH': return 'No threat match in configured checks · not a safety guarantee';
+    case 'THREAT_DETECTED': return 'Threat reported by a configured reputation source';
+    default: return 'Safety not assessed by a reputation source';
+  }
+}
+
 
 function getData<T>(response: any): T {
   return (response?.data ?? response) as T;
@@ -94,6 +153,25 @@ function displayList(value?: string[] | string | null): string {
   return value || '';
 }
 
+function assertEligiblePublicHostname(parsed: URL): void {
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  const labels = hostname.split('.');
+  const reservedTlds = new Set(['localhost', 'local', 'internal', 'test', 'invalid', 'example']);
+  if (reservedTlds.has(labels[labels.length - 1] ?? '')) {
+    throw new Error('Reserved/local/test domains such as .invalid, .test, .example, and localhost cannot be used.');
+  }
+  const validLabel = (label: string) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+  const validTld = (label: string) => /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+  if (
+    hostname.length > 253 ||
+    labels.length < 2 ||
+    labels.some((label) => !validLabel(label)) ||
+    !validTld(labels[labels.length - 1] ?? '')
+  ) {
+    throw new Error('Enter an eligible public domain name, not an IP address, local name, or malformed hostname.');
+  }
+}
+
 function normalizeWebsite(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return '';
@@ -106,8 +184,63 @@ function normalizeWebsite(value: string): string {
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new Error('Enter a valid HTTP or HTTPS website.');
   }
+  assertEligiblePublicHostname(parsed);
 
   return parsed.toString();
+}
+
+type BrandTrustState = 'INELIGIBLE' | 'UNVERIFIED' | 'LEGACY' | 'VERIFIED';
+
+function primaryDomainForBrand(brand: Brand): string {
+  if (brand.primary_domain?.trim()) {
+    return brand.primary_domain.trim().toLowerCase().replace(/\.$/, '');
+  }
+  if (!brand.website) return '';
+  try {
+    const value = /^https?:\/\//i.test(brand.website) ? brand.website : `https://${brand.website}`;
+    return new URL(value).hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function brandTrustState(brand: Brand): BrandTrustState {
+  const primaryDomain = primaryDomainForBrand(brand);
+  if (!primaryDomain) return 'INELIGIBLE';
+  try {
+    normalizeWebsite(primaryDomain);
+  } catch {
+    return 'INELIGIBLE';
+  }
+  const assets = brand.assets ?? brand.official_assets ?? [];
+  const primaryAsset = assets.find((asset) =>
+    isDomainAsset(asset) &&
+    [asset.value, asset.identifier].some((value) =>
+      typeof value === 'string' && value.trim().toLowerCase().replace(/\.$/, '') === primaryDomain,
+    ),
+  );
+  if (primaryAsset && isTrustedAsset(primaryAsset)) {
+    return primaryAsset.verification_status === 'VERIFIED' ? 'VERIFIED' : 'LEGACY';
+  }
+  return 'UNVERIFIED';
+}
+
+function brandTrustLabel(brand: Brand): string {
+  switch (brandTrustState(brand)) {
+    case 'VERIFIED': return 'Primary domain verified';
+    case 'LEGACY': return 'Legacy primary · re-verify';
+    case 'INELIGIBLE': return 'Ineligible · not official';
+    default: return 'Unverified profile';
+  }
+}
+
+function brandTrustClasses(brand: Brand): string {
+  switch (brandTrustState(brand)) {
+    case 'VERIFIED': return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+    case 'LEGACY': return 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300';
+    case 'INELIGIBLE': return 'border-rose-500/30 bg-rose-500/10 text-rose-300';
+    default: return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+  }
 }
 
 function readLogoFile(file: File): Promise<string> {
@@ -156,7 +289,7 @@ function ErrorNotice({
   );
 }
 
-export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
+export const BrandsView: React.FC<{ t: Translator }> = ({ t }) => {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [selectedBrandId, setSelectedBrandId] = useState<string | number | null>(
     null,
@@ -169,6 +302,33 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
   const [showAssetForm, setShowAssetForm] = useState(false);
   const [brandForm, setBrandForm] = useState<BrandForm>(emptyBrandForm);
   const [assetForm, setAssetForm] = useState<AssetForm>(emptyAssetForm);
+  const [verificationBusy, setVerificationBusy] = useState('');
+  const [challenge, setChallenge] = useState<DomainChallenge | null>(null);
+  const [logoCheck, setLogoCheck] = useState<{
+    loading: boolean;
+    error: string;
+    result: any | null;
+  }>({ loading: false, error: '', result: null });
+
+  const checkLogo = useCallback(async (domain: string) => {
+    setLogoCheck({ loading: true, error: '', result: null });
+    try {
+      const response = await apiRequest<any>(
+        `/intelligence/logo/domain/${encodeURIComponent(domain)}/meta`,
+        { timeoutMs: 30000 },
+      );
+      setLogoCheck({ loading: false, error: '', result: response?.data ?? response });
+    } catch (caught) {
+      setLogoCheck({
+        loading: false,
+        error:
+          caught instanceof Error
+            ? caught.message
+            : 'The logo could not be resolved for this domain.',
+        result: null,
+      });
+    }
+  }, []);
 
   const selectedBrand =
     brands.find((brand) => String(brand.id) === String(selectedBrandId)) ?? null;
@@ -219,7 +379,9 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
 
     try {
       const website = normalizeWebsite(brandForm.website);
-      const domains = splitList(brandForm.domains);
+      const domains = splitList(brandForm.domains).map((domain) =>
+        new URL(normalizeWebsite(domain)).hostname.toLowerCase(),
+      );
 
       if (!brandForm.name.trim()) {
         throw new Error('Enter a brand name.');
@@ -250,7 +412,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
         setSelectedBrandId(created.id);
       }
 
-      setNotice('Brand profile saved.');
+      setNotice('Brand profile saved as UNVERIFIED. Add the exact primary domain as an asset and complete proof before treating this profile as official.');
     } catch (err) {
       setError(
         err instanceof Error ? err.message : 'Unable to create this brand.',
@@ -290,7 +452,6 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
           platform: assetForm.platform.trim(),
           identifier,
           url,
-          is_verified: assetForm.confirmOwnership,
           ...(assetForm.imageBase64
             ? { imageBase64: assetForm.imageBase64, imageMime: assetForm.imageMime }
             : {}),
@@ -304,7 +465,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
       setShowAssetForm(false);
       await fetchBrands();
       setNotice(
-        'Official asset submitted. Verification status is shown only when returned by the server.',
+        'Asset saved as PENDING_VERIFICATION. It is visible in the registry, but it is not trusted and creates no official exclusion.',
       );
     } catch (err) {
       setError(
@@ -314,6 +475,71 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
       setSaving(false);
     }
   };
+
+  const createDomainChallenge = async (
+    asset: OfficialAsset,
+    method: 'DNS_TXT' | 'WELL_KNOWN',
+  ) => {
+    if (!selectedBrand || !asset.id) return;
+    setVerificationBusy(`${asset.id}:challenge`);
+    setError('');
+    setNotice('');
+    try {
+      const response = await apiRequest<{ data?: Omit<DomainChallenge, 'assetId'> }>(
+        `/brands/${encodeURIComponent(String(selectedBrand.id))}/assets/${encodeURIComponent(String(asset.id))}/verification-challenges`,
+        { method: 'POST', body: JSON.stringify({ method }), timeoutMs: 30000 },
+      );
+      if (!response.data?.token || !response.data.challengeId) {
+        throw new Error('The server did not return a usable verification challenge.');
+      }
+      setChallenge({ ...response.data, assetId: String(asset.id) });
+      setNotice('Challenge created. Publish the token, then run the verification check before it expires.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create the verification challenge.');
+    } finally {
+      setVerificationBusy('');
+    }
+  };
+
+  const verifyDomain = async (asset: OfficialAsset) => {
+    if (!selectedBrand || !asset.id || !challenge || challenge.assetId !== String(asset.id)) return;
+    setVerificationBusy(`${asset.id}:verify`);
+    setError('');
+    setNotice('');
+    try {
+      await apiRequest(
+        `/brands/${encodeURIComponent(String(selectedBrand.id))}/assets/${encodeURIComponent(String(asset.id))}/verification-challenges/${encodeURIComponent(challenge.challengeId)}/verify`,
+        { method: 'POST', body: JSON.stringify({ token: challenge.token }), timeoutMs: 120000 },
+      );
+      setChallenge(null);
+      await fetchBrands();
+      setNotice('Domain proof verified for this brand record. Only its linked same-brand exclusion was activated; this is not a safety guarantee.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Domain verification failed.');
+    } finally {
+      setVerificationBusy('');
+    }
+  };
+
+  const verifyAssociation = async (asset: OfficialAsset) => {
+    if (!selectedBrand || !asset.id) return;
+    setVerificationBusy(`${asset.id}:associate`);
+    setError('');
+    setNotice('');
+    try {
+      await apiRequest(
+        `/brands/${encodeURIComponent(String(selectedBrand.id))}/assets/${encodeURIComponent(String(asset.id))}/verify-association`,
+        { method: 'POST', body: JSON.stringify({}), timeoutMs: 120000 },
+      );
+      await fetchBrands();
+      setNotice('Asset association verified from an exact declaration on a verified brand domain.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Asset association verification failed.');
+    } finally {
+      setVerificationBusy('');
+    }
+  };
+
 
   const assets = selectedBrand?.assets ?? selectedBrand?.official_assets ?? [];
 
@@ -327,11 +553,10 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
           </div>
           <h1 className="flex items-center gap-3 text-2xl font-bold text-white sm:text-3xl">
             <Building2 className="h-7 w-7 text-blue-400" />
-            {t?.brand?.title ?? 'Brand profiles'}
+            {t('brand.title')}
           </h1>
           <p className="mt-2 max-w-2xl text-sm text-slate-400">
-            Register legitimate brand identities and their official digital
-            assets so monitoring can compare discovered accounts against them.
+            {t('brand.subtitle')}
           </p>
         </div>
 
@@ -343,7 +568,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
             className="btn-secondary inline-flex items-center gap-2"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
+            {t('common.refresh')}
           </button>
           <button
             type="button"
@@ -354,7 +579,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
             className="btn-primary inline-flex items-center gap-2"
           >
             <Plus className="h-4 w-4" />
-            {t?.brand?.createBtn ?? 'Register brand'}
+            {t('brand.createBtn')}
           </button>
         </div>
       </header>
@@ -373,7 +598,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
         <aside className="surface-card min-w-0 p-4 sm:p-5">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
-              <h2 className="font-semibold text-white">Registered brands</h2>
+              <h2 className="font-semibold text-white">Brand profiles</h2>
               <p className="mt-1 text-xs text-slate-500">
                 {loading ? 'Loading records…' : `${brands.length} server record(s)`}
               </p>
@@ -394,14 +619,14 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                 No brand profiles found
               </p>
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                Register a brand to start building its official asset registry.
+                Add a reviewable profile, then prove its primary domain and official assets.
               </p>
               <button
                 type="button"
                 onClick={() => setShowBrandForm(true)}
                 className="btn-primary mt-4"
               >
-                Register first brand
+                Add first brand profile
               </button>
             </div>
           ) : (
@@ -409,6 +634,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
               {brands.map((brand) => {
                 const active =
                   String(selectedBrandId) === String(brand.id);
+                const trustState = brandTrustState(brand);
                 return (
                   <button
                     type="button"
@@ -422,9 +648,12 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                     }`}
                   >
                     <div className="flex items-start gap-3">
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-slate-700 bg-slate-900 text-blue-300">
-                        <Building2 className="h-5 w-5" />
-                      </div>
+                      <BrandLogo
+                        brandId={brand.id}
+                        domain={brand.primary_domain}
+                        name={brand.name}
+                        size={40}
+                      />
                       <div className="min-w-0 flex-1">
                         <p className="truncate font-semibold text-white">
                           {brand.name}
@@ -433,6 +662,9 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                           <Globe className="h-3 w-3 shrink-0" />
                           {brand.website || brand.primary_domain || 'Website not provided'}
                         </p>
+                        <span className={`mt-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${brandTrustClasses(brand)}`}>
+                          {trustState === 'INELIGIBLE' ? 'Ineligible · not official' : brandTrustLabel(brand)}
+                        </span>
                       </div>
                     </div>
                   </button>
@@ -446,7 +678,15 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
           {selectedBrand ? (
             <>
               <div className="flex flex-col justify-between gap-4 border-b border-slate-800 pb-5 sm:flex-row sm:items-start">
-                <div className="min-w-0">
+                <div className="flex min-w-0 items-start gap-4">
+                  <BrandLogo
+                    brandId={selectedBrand.id}
+                    domain={selectedBrand.primary_domain}
+                    name={selectedBrand.name}
+                    size={64}
+                    verified={brandTrustState(selectedBrand) !== 'INELIGIBLE'}
+                  />
+                  <div className="min-w-0">
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">
                     Brand record
                   </p>
@@ -458,24 +698,108 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                       selectedBrand.primary_domain ||
                       'No official website recorded'}
                   </p>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setError('');
-                    setShowAssetForm(true);
-                  }}
-                  className="btn-primary inline-flex shrink-0 items-center justify-center gap-2"
-                >
-                  <Plus className="h-4 w-4" />
-                  Add official asset
-                </button>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${brandTrustClasses(selectedBrand)}`}>
+                    {brandTrustLabel(selectedBrand)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setError('');
+                      setShowAssetForm(true);
+                    }}
+                    className="btn-primary inline-flex items-center justify-center gap-2"
+                  >
+                    <Plus className="h-4 w-4" />
+                    Add registry asset
+                  </button>
+                </div>
+              </div>
+
+              {brandTrustState(selectedBrand) === 'INELIGIBLE' && (
+                <div role="alert" className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs leading-5 text-rose-200">
+                  This previously saved profile has an ineligible or reserved primary domain. It is not official and cannot pass domain verification. New submissions with this domain are now rejected.
+                </div>
+              )}
+
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+                <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                  <div>
+                    <p className="text-sm font-semibold text-white">Brand logo</p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Resolved live from the official site (apple-touch-icon, Open Graph
+                      image or web manifest) — not a placeholder.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={logoCheck.loading || !selectedBrand.primary_domain}
+                    onClick={() =>
+                      selectedBrand.primary_domain &&
+                      void checkLogo(selectedBrand.primary_domain)
+                    }
+                    className="btn-secondary inline-flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {logoCheck.loading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Search className="h-4 w-4" />
+                    )}
+                    Check logo
+                  </button>
+                </div>
+
+                {logoCheck.error && (
+                  <p className="mt-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                    {logoCheck.error}
+                  </p>
+                )}
+
+                {logoCheck.result && (
+                  <div className="mt-3 flex items-start gap-3 rounded-lg border border-slate-700 bg-slate-900/60 p-3">
+                    <img
+                      src={
+                        logoCheck.result.imageUrl
+                          ? logoCheck.result.imageUrl.replace(/^\/api(?=\/)/, getApiBaseUrl())
+                          : `${getApiBaseUrl()}/intelligence/logo/domain/${encodeURIComponent(
+                              String(selectedBrand.primary_domain),
+                            )}/image`
+                      }
+                      alt="Resolved brand logo"
+                      className="h-14 w-14 rounded-lg border border-slate-700 bg-white object-contain p-1"
+                      onError={(event) => {
+                        (event.target as HTMLImageElement).style.display = 'none';
+                      }}
+                    />
+                    <div className="min-w-0 text-xs text-slate-400">
+                      <p className="font-medium text-slate-200">
+                        {logoCheck.result.status === 'resolved'
+                          ? `Logo found (${logoCheck.result.width}×${logoCheck.result.height})`
+                          : 'No usable logo found'}
+                      </p>
+                      <p className="mt-1 break-all">
+                        Declared in: {logoCheck.result.declaredIn ?? 'unknown'}
+                      </p>
+                      <p className="mt-0.5 break-all">
+                        Source: {logoCheck.result.sourceUrl ?? 'n/a'}
+                      </p>
+                      {Array.isArray(logoCheck.result.attempts) &&
+                        logoCheck.result.attempts.length > 0 && (
+                          <p className="mt-1 text-slate-500">
+                            Tried {logoCheck.result.attempts.length} candidate URL(s).
+                          </p>
+                        )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="grid gap-3 py-5 sm:grid-cols-2">
                 <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
                   <p className="text-xs uppercase tracking-wider text-slate-500">
-                    Official assets
+                    Registry submissions
                   </p>
                   <p className="mt-2 text-2xl font-semibold text-white">
                     {assets.length}
@@ -483,7 +807,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
                   <p className="text-xs uppercase tracking-wider text-slate-500">
-                    Registered domains
+                    Declared domains
                   </p>
                   <p className="mt-2 text-2xl font-semibold text-white">
                     {displayList(selectedBrand.domains ?? selectedBrand.associated_domains) ||
@@ -495,9 +819,10 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
 
               <div>
                 <div className="mb-3 flex items-center justify-between gap-3">
-                  <h3 className="font-semibold text-white">
-                    Official asset registry
-                  </h3>
+                  <div>
+                    <h3 className="font-semibold text-white">Official asset registry</h3>
+                    <p className="mt-1 text-xs text-slate-500">Technical proof establishes registry association, not legal identity or guaranteed safety.</p>
+                  </div>
                   <span className="text-xs text-slate-500">
                     {assets.length} asset(s)
                   </span>
@@ -516,52 +841,110 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                 ) : (
                   <div className="space-y-2">
                     {assets.map((asset, index) => {
-                      const verified =
-                        asset.is_verified === true || asset.verified === true;
+                      const trusted = isTrustedAsset(asset);
+                      const status = asset.verification_status ??
+                        (trusted ? 'VERIFIED_LEGACY' : 'PENDING_VERIFICATION');
+                      const busy = verificationBusy.startsWith(`${asset.id}:`);
+                      const domain = isDomainAsset(asset);
                       return (
                         <div
                           key={asset.id ?? `${asset.platform}-${asset.identifier}-${index}`}
-                          className="flex flex-col justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/40 p-4 sm:flex-row sm:items-center"
+                          className="rounded-xl border border-slate-800 bg-slate-950/40 p-4"
                         >
-                          <div className="flex min-w-0 items-start gap-3">
-                            <div className="rounded-lg border border-slate-700 bg-slate-900 p-2 text-blue-300">
-                              <ShieldCheck className="h-5 w-5" />
+                          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                            <div className="flex min-w-0 items-start gap-3">
+                              <div className={`rounded-lg border p-2 ${trusted ? 'border-emerald-700 bg-emerald-950/30 text-emerald-300' : 'border-slate-700 bg-slate-900 text-amber-300'}`}>
+                                <ShieldCheck className="h-5 w-5" />
+                              </div>
+                              <div className="min-w-0">
+                                <p className="break-all font-mono text-sm text-slate-200">
+                                  {asset.identifier || asset.url || 'Identifier unavailable'}
+                                </p>
+                                <p className="mt-1 text-xs capitalize text-slate-500">
+                                  {[asset.platform, asset.asset_type].filter(Boolean).join(' · ') || 'Asset type unavailable'}
+                                </p>
+                                {(asset.url || asset.canonical_url) && asset.identifier !== (asset.url || asset.canonical_url) && (
+                                  <a
+                                    href={asset.url || asset.canonical_url || undefined}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="mt-1 inline-block break-all text-xs text-blue-400 hover:underline"
+                                  >
+                                    Open asset URL
+                                  </a>
+                                )}
+                                <p className="mt-2 text-xs leading-5 text-slate-500">{safetyLabel(asset)}</p>
+                                {asset.verification_method && (
+                                  <p className="mt-1 text-xs text-slate-500">Method: {asset.verification_method}</p>
+                                )}
+                              </div>
                             </div>
-                            <div className="min-w-0">
-                              <p className="break-all font-mono text-sm text-slate-200">
-                                {asset.identifier || asset.url || 'Identifier unavailable'}
-                              </p>
-                              <p className="mt-1 text-xs capitalize text-slate-500">
-                                {[asset.platform, asset.asset_type]
-                                  .filter(Boolean)
-                                  .join(' · ') || 'Asset type unavailable'}
-                              </p>
-                              {(asset.url || asset.canonical_url) && asset.identifier !== (asset.url || asset.canonical_url) && (
-                                <a
-                                  href={asset.url || asset.canonical_url || undefined}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="mt-1 inline-block break-all text-xs text-blue-400 hover:underline"
-                                >
-                                  Open asset URL
-                                </a>
+                            <div className="flex shrink-0 flex-wrap items-center gap-2">
+                              <span
+                                className={`inline-flex w-fit items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${
+                                  trusted
+                                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                                    : status === 'REJECTED' || status === 'REVOKED'
+                                      ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
+                                      : 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                                }`}
+                              >
+                                {trusted ? <CheckCircle2 className="h-3.5 w-3.5" /> : <CircleAlert className="h-3.5 w-3.5" />}
+                                {verificationLabel(asset)}
+                              </span>
+                              {domain ? (
+                                <>
+                                  <button type="button" disabled={busy} onClick={() => void createDomainChallenge(asset, 'DNS_TXT')} className="btn-secondary px-2.5 py-1 text-xs">
+                                    DNS challenge
+                                  </button>
+                                  <button type="button" disabled={busy} onClick={() => void createDomainChallenge(asset, 'WELL_KNOWN')} className="btn-secondary px-2.5 py-1 text-xs">
+                                    File challenge
+                                  </button>
+                                </>
+                              ) : (asset.asset_type ?? '') !== 'trademark' && (
+                                <button type="button" disabled={busy} onClick={() => void verifyAssociation(asset)} className="btn-secondary px-2.5 py-1 text-xs">
+                                  {trusted ? 'Re-verify association' : 'Verify association'}
+                                </button>
                               )}
                             </div>
                           </div>
-                          <span
-                            className={`inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${
-                              verified
-                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                                : 'border-amber-500/30 bg-amber-500/10 text-amber-300'
-                            }`}
-                          >
-                            {verified ? (
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                            ) : (
-                              <CircleAlert className="h-3.5 w-3.5" />
-                            )}
-                            {verified ? 'Registered as official' : 'Pending review'}
-                          </span>
+
+                          {!domain && !trusted && (
+                            <p className="mt-3 rounded-lg bg-slate-900/70 p-3 text-xs leading-5 text-slate-400">
+                              Verification requires an exact declaration for this asset in <code>/.well-known/findout-assets.json</code> on the freshly verified (not legacy-only) primary domain. A public listing, matching name, or logo is not association proof.
+                            </p>
+                          )}
+
+                          {domain && (
+                            <p className="mt-3 rounded-lg bg-slate-900/70 p-3 text-xs leading-5 text-slate-400">
+                              If this is not the brand primary domain, publish both this challenge and an exact domain entry in the asset manifest on the freshly verified primary domain.
+                            </p>
+                          )}
+
+                          {challenge?.assetId === String(asset.id) && (
+                            <div className="mt-4 space-y-3 rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-3 text-xs">
+                              <p className="font-semibold text-cyan-200">
+                                {challenge.method === 'DNS_TXT' ? 'Publish this DNS TXT record' : 'Publish this verification file'}
+                              </p>
+                              {challenge.method === 'DNS_TXT' ? (
+                                <>
+                                  <p className="text-slate-400">Host/name: <code className="break-all text-slate-200">{challenge.dnsName}</code></p>
+                                  <p className="text-slate-400">TXT value:</p>
+                                  <code className="block break-all rounded bg-slate-950 p-2 text-cyan-100">{challenge.dnsValue}</code>
+                                </>
+                              ) : (
+                                <>
+                                  <p className="text-slate-400">URL: <code className="break-all text-slate-200">{challenge.wellKnownUrl}</code></p>
+                                  <p className="text-slate-400">File contents:</p>
+                                  <code className="block break-all rounded bg-slate-950 p-2 text-cyan-100">{challenge.fileContents}</code>
+                                </>
+                              )}
+                              <p className="text-slate-500">Expires: {new Date(challenge.expiresAt).toLocaleString()}. The token is shown here, not stored as plaintext by the backend.</p>
+                              <button type="button" disabled={busy} onClick={() => void verifyDomain(asset)} className="btn-primary px-3 py-1.5 text-xs">
+                                {busy ? 'Checking proof…' : 'Check domain proof'}
+                              </button>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -719,10 +1102,10 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
             <div className="mb-5 flex items-start justify-between gap-3">
               <div>
                 <h2 id="asset-dialog-title" className="text-xl font-bold text-white">
-                  Add official asset
+                  Add registry asset
                 </h2>
                 <p className="mt-1 text-sm text-slate-400">
-                  For {selectedBrand.name}. Ownership is not independently verified. Only confirmed assets are used for automatic exclusions.
+                  For {selectedBrand.name}. Every submission starts pending. Backend proof is required before official trust or exclusions.
                 </p>
               </div>
               <button
@@ -740,9 +1123,18 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                 <span className="text-sm text-slate-300">Asset category *</span>
                 <select
                   value={assetForm.asset_type}
-                  onChange={(event) =>
-                    setAssetForm({ ...assetForm, asset_type: event.target.value })
-                  }
+                  onChange={(event) => {
+                    const nextType = event.target.value;
+                    setAssetForm({
+                      ...assetForm,
+                      asset_type: nextType,
+                      platform: nextType === 'domain' || nextType === 'logo'
+                        ? 'website'
+                        : nextType === 'mobile_app'
+                          ? 'app_store'
+                          : assetForm.platform,
+                    });
+                  }}
                   className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-3 text-sm text-white outline-none focus:border-blue-500"
                 >
                   <option value="social_profile">Social profile</option>
@@ -767,6 +1159,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                   <option value="facebook">Facebook</option>
                   <option value="x">X</option>
                   <option value="youtube">YouTube</option>
+                  <option value="bluesky">Bluesky</option>
                   <option value="linkedin">LinkedIn</option>
                   <option value="tiktok">TikTok</option>
                   <option value="play_store">Google Play</option>
@@ -847,17 +1240,9 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                 </label>
               )}
 
-              <label className="flex items-start gap-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={assetForm.confirmOwnership}
-                  onChange={(event) =>
-                    setAssetForm({ ...assetForm, confirmOwnership: event.target.checked })
-                  }
-                  className="mt-0.5 accent-cyan-400"
-                />
-                <span>I confirm that this is an organization-owned official asset. Unconfirmed entries stay pending and are not excluded.</span>
-              </label>
+              <p className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-xs leading-5 text-slate-400">
+                Submission alone never marks an asset official. The primary domain uses DNS/file proof. Additional domains also need an exact declaration on the freshly verified primary domain; social, app, and logo assets use that same declaration model.
+              </p>
 
               <div className="flex justify-end gap-2 border-t border-slate-800 pt-4">
                 <button
@@ -870,7 +1255,7 @@ export const BrandsView: React.FC<{ t: any }> = ({ t }) => {
                 </button>
                 <button type="submit" disabled={saving} className="btn-primary inline-flex items-center gap-2">
                   {saving && <LoaderCircle className="h-4 w-4 animate-spin" />}
-                  Save asset
+                  Submit for verification
                 </button>
               </div>
             </form>

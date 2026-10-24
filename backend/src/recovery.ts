@@ -14,6 +14,7 @@ export interface SystemHealthReport {
 export interface StalledJobRepairResult {
   repairedInvestigationsCount: number;
   repairedMonitoringJobsCount: number;
+  repairedMonitoringRunsCount: number;
 }
 
 export interface IncidentAssessment {
@@ -123,7 +124,7 @@ export class RecoveryService {
         "alerts",
         "complaints",
         "reports",
-        "audit_logs",
+        "source_audit_logs",
       ];
 
       const counts: Record<string, number> = {};
@@ -172,7 +173,10 @@ export class RecoveryService {
    * Resets investigations and background monitoring jobs stalled due to unhandled restarts.
    */
   async recoverStalledJobs(timeoutMinutes = 15): Promise<StalledJobRepairResult> {
-    logger.info("[recovery] Scanning for orphan or stalled jobs", { timeoutMinutes });
+    const effectiveTimeout = Number.isFinite(timeoutMinutes)
+      ? Math.min(1440, Math.max(1, Math.floor(timeoutMinutes)))
+      : 15;
+    logger.info("[recovery] Scanning for orphan or stalled jobs", { timeoutMinutes: effectiveTimeout });
 
     // Mark stalled analyzing investigations as failed
     const invRes = await query<QueryResultRow>(
@@ -183,7 +187,7 @@ export class RecoveryService {
        WHERE status = 'analyzing'
          AND updated_at < NOW() - ($1 || ' minutes')::interval
        RETURNING id;`,
-      [timeoutMinutes.toString()]
+      [effectiveTimeout.toString()]
     );
 
     // Reset stalled monitoring jobs
@@ -194,20 +198,37 @@ export class RecoveryService {
        WHERE status = 'running'
          AND started_at < NOW() - ($1 || ' minutes')::interval
        RETURNING id;`,
-      [timeoutMinutes.toString()]
+      [effectiveTimeout.toString()]
+    );
+
+    const monitoringRunRes = await query<QueryResultRow>(
+      `UPDATE monitoring_runs
+       SET status = 'FAILED',
+           source_errors = $2::jsonb,
+           completed_at = NOW()
+       WHERE status = 'IN_PROGRESS'
+         AND started_at < NOW() - ($1 || ' minutes')::interval
+       RETURNING id;`,
+      [
+        effectiveTimeout.toString(),
+        JSON.stringify([{ source: "monitoring_run", error: "Monitoring run timed out or the server restarted." }]),
+      ]
     );
 
     const repairedInvestigationsCount = invRes.rowCount ?? 0;
     const repairedMonitoringJobsCount = monRes.rowCount ?? 0;
+    const repairedMonitoringRunsCount = monitoringRunRes.rowCount ?? 0;
 
     logger.info("[recovery] Stalled job repair routine completed", {
       repairedInvestigationsCount,
       repairedMonitoringJobsCount,
+      repairedMonitoringRunsCount,
     });
 
     return {
       repairedInvestigationsCount,
       repairedMonitoringJobsCount,
+      repairedMonitoringRunsCount,
     };
   }
 
@@ -217,7 +238,9 @@ export class RecoveryService {
   async exportSystemAuditSummary(): Promise<Record<string, unknown>> {
     const health = await this.checkHealth();
     const recentAudits = await query(
-      `SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 50;`
+      `SELECT id, investigation_id, source, status, latency_ms, error_message,
+              attempted_at AS created_at
+       FROM source_audit_logs ORDER BY attempted_at DESC LIMIT 50;`
     );
 
     return {

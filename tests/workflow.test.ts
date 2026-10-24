@@ -63,7 +63,7 @@ describe('Brand registration and monitoring workflow', () => {
     });
   });
 
-  it('persists brand profile input and registers its primary domain exclusion', async () => {
+  it('persists brand profile input without trusting its unverified primary domain', async () => {
     const service = new BrandService();
     const registered = await service.createBrand({
       name: brand.name,
@@ -77,9 +77,9 @@ describe('Brand registration and monitoring workflow', () => {
       expect.stringContaining('alternate_names, associated_domains, keywords'),
       expect.arrayContaining([brand.name, brand.slug, brand.primary_domain]),
     );
-    expect(mockQuery).toHaveBeenCalledWith(
+    expect(mockQuery).not.toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO exclusion_rules'),
-      [brand.primary_domain, expect.any(String)],
+      expect.any(Array),
     );
   });
 
@@ -134,9 +134,19 @@ describe('Brand registration and monitoring workflow', () => {
     });
 
     expect(result.status).toBe('generated');
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining("VALUES ($1, $2, $3, $4, $5, 'generated'"),
-      expect.any(Array),
+    // The complaint is stored as a draft with status 'generated'. Assert the
+    // stored contract (not an exact SQL string, which made this test break on
+    // every legitimate query change): a row is inserted into `complaints` with
+    // the 'generated' status and the reporter/recipient values.
+    const insertCall = mockQuery.mock.calls.find(
+      (call: unknown[]) =>
+        typeof call[0] === 'string' &&
+        call[0].includes('INSERT INTO complaints') &&
+        call[0].includes("'generated'"),
+    );
+    expect(insertCall).toBeDefined();
+    expect(insertCall?.[1]).toEqual(
+      expect.arrayContaining(['investigation-1', 'report@example.com']),
     );
   });
 });

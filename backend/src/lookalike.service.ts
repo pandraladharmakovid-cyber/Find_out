@@ -14,6 +14,12 @@ export interface LookalikeEvaluation {
   similarityRatio: number;
   isLookalike: boolean;
   detectedTechnique: string | null;
+  /** Label with separators and homoglyphs folded (e.g. "nexusp4y-login"). */
+  normalizedLabel?: string;
+  /** Label after deceptive words such as "login" are removed. */
+  coreLabel?: string;
+  /** Edit distance between the stripped label and the brand. */
+  coreEditDistance?: number;
 }
 
 const COMMON_HOMOGLYPHS: Record<string, string[]> = {
@@ -63,6 +69,64 @@ const UNICODE_CONFUSABLES: Record<string, string> = {
   "ζ": "z",
 };
 
+/**
+ * Leetspeak digits are the cheapest way to dodge a plain string comparison
+ * ("nexusp4y" vs "nexuspay"). They are folded to their letter equivalents so
+ * the edit distance reflects what a human reads.
+ */
+const DIGIT_CONFUSABLES: Record<string, string> = {
+  "0": "o",
+  "1": "l",
+  "3": "e",
+  "4": "a",
+  "5": "s",
+  "7": "t",
+  "8": "b",
+  "9": "g",
+};
+
+/** Words attackers append to a brand to look official. */
+export const DECEPTIVE_AFFIXES = [
+  "login",
+  "logon",
+  "signin",
+  "signon",
+  "verify",
+  "verification",
+  "secure",
+  "security",
+  "support",
+  "official",
+  "account",
+  "update",
+  "wallet",
+  "app",
+  "pay",
+  "payment",
+  "help",
+  "service",
+  "auth",
+  "online",
+  "banking",
+  "portal",
+  "customers",
+  "team",
+  "offer",
+  "offers",
+  "deals",
+  "sale",
+  "gift",
+  "gifts",
+  "bonus",
+  "reward",
+  "rewards",
+  "free",
+  "claim",
+  "kyc",
+  "refund",
+  "prize",
+];
+
 export function normalizeComparableName(value: string): string {
   const normalized = value
     .normalize("NFKC")
@@ -70,9 +134,44 @@ export function normalizeComparableName(value: string): string {
     .replace(/[аαвьсϲԁеεіιјκӏοорρԛгѕτυνԝхχуζ]/g, (character) =>
       UNICODE_CONFUSABLES[character] ?? character,
     )
+    .replace(/[0-9]/g, (digit) => DIGIT_CONFUSABLES[digit] ?? digit)
     .replace(/rn/g, "m")
     .replace(/vv/g, "w");
   return normalized.replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+/**
+ * Removes a deceptive word attached to the brand ("nexuspay" + "login") without
+ * mangling brands that legitimately contain such a word ("PayPal" contains
+ * "pay"), which is why the brand must be supplied.
+ */
+export function stripDeceptiveAffixes(label: string, brand = ""): string {
+  const current = normalizeComparableName(label);
+  const normalizedBrand = normalizeComparableName(brand);
+
+  if (!normalizedBrand || current === normalizedBrand) return current;
+
+  const affixPattern = DECEPTIVE_AFFIXES.join("|");
+  const isAffixOnly = (value: string): boolean =>
+    value.length > 0 && new RegExp(`^(?:${affixPattern})+$`).test(value);
+
+  const suffix = current.startsWith(normalizedBrand)
+    ? current.slice(normalizedBrand.length)
+    : null;
+  const prefix = current.endsWith(normalizedBrand)
+    ? current.slice(0, current.length - normalizedBrand.length)
+    : null;
+
+  if ((suffix !== null && isAffixOnly(suffix)) || (prefix !== null && isAffixOnly(prefix))) {
+    return normalizedBrand;
+  }
+
+  return current;
+}
+
+/** Lowercase label with separators removed but digits preserved. */
+function rawLabel(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 export class LookalikeDetectionService {
@@ -247,18 +346,38 @@ export class LookalikeDetectionService {
     const distance = this.levenshtein(normalizedSuspectLabel, brandLabel);
     const similarity = this.similarityRatio(normalizedSuspectLabel, brandLabel);
 
+    // "nexusp4y-login" folds to "nexuspaylogin": strip the deceptive tail so
+    // the comparison sees the brand, then keep the real distance for the report.
+    const coreLabel = stripDeceptiveAffixes(normalizedSuspectLabel, brandLabel);
+    const coreDistance = this.levenshtein(coreLabel, brandLabel);
+    const coreSimilarity = this.similarityRatio(coreLabel, brandLabel);
+
+    const brandTokenEmbedded =
+      normalizedSuspectLabel !== brandLabel &&
+      (normalizedSuspectLabel.includes(brandLabel) || coreLabel.includes(brandLabel));
+
+    // "nexusp4y" folds onto "nexuspay" — identical after homoglyph folding but
+    // still a different spelling, which is exactly what typosquatters register.
+    const homoglyphSubstitution =
+      normalizedSuspectLabel === brandLabel &&
+      rawLabel(suspectLabel) !== rawLabel(brandLabel);
+
     let isLookalike = false;
     let detectedTechnique: string | null = null;
 
-    if (normalizedSuspectLabel === brandLabel) {
-      isLookalike = false; // Exact match, handled by whitelist
-    } else if (distance <= 2 && suspectLabel.length >= 4) {
+    if (homoglyphSubstitution) {
       isLookalike = true;
-      detectedTechnique = "typosquatting_edit_distance";
-    } else if (similarity >= 0.75) {
+      detectedTechnique = "homoglyph_substitution";
+    } else if (normalizedSuspectLabel === brandLabel) {
+      isLookalike = false; // Exact match, handled by the official-asset registry
+    } else if (coreDistance <= 2 && coreLabel.length >= 4) {
+      isLookalike = true;
+      detectedTechnique =
+        coreLabel !== normalizedSuspectLabel ? "deceptive_affix_typosquat" : "typosquatting_edit_distance";
+    } else if (coreSimilarity >= 0.75 || similarity >= 0.75) {
       isLookalike = true;
       detectedTechnique = "high_phonetic_lexical_similarity";
-    } else if (normalizedSuspectLabel.includes(brandLabel) && normalizedSuspectLabel !== brandLabel) {
+    } else if (brandTokenEmbedded) {
       isLookalike = true;
       detectedTechnique = "brand_keyword_embedding";
     }
@@ -268,6 +387,7 @@ export class LookalikeDetectionService {
       brandLabel,
       distance,
       similarity,
+      coreLabel,
       isLookalike,
     });
 
@@ -275,9 +395,12 @@ export class LookalikeDetectionService {
       targetDomain: suspectDomain,
       referenceBrand: officialBrand,
       levenshteinDistance: distance,
-      similarityRatio: similarity,
+      similarityRatio: Math.max(similarity, coreSimilarity),
       isLookalike,
       detectedTechnique,
+      normalizedLabel: normalizedSuspectLabel,
+      coreLabel,
+      coreEditDistance: coreDistance,
     };
   }
 }

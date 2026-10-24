@@ -1,4 +1,7 @@
-import { query } from "./db";
+import { randomUUID } from "node:crypto";
+import { query, withTransaction } from "./db";
+import { runWithDeadline } from "./utils/timeout";
+import { config } from "./config";
 import { logger } from "./utils/logger";
 import { brandService } from "./brands";
 import { lookalikeDetectionService, normalizeComparableName } from "./lookalike.service";
@@ -87,22 +90,28 @@ function socialCandidates(
   const brandNames = [brandName, ...alternateNames].map(normalizeComparableName).filter(Boolean);
   const candidates: StoredCandidateInput[] = [];
 
-  for (const post of result.redditData.posts) {
-    const profileUrl = `https://www.reddit.com/user/${encodeURIComponent(post.author)}/`;
-    const author = post.author || "Unknown Reddit account";
+  for (const post of result.blueskyData.posts) {
+    const handle = post.author || post.authorDid;
+    const author = post.displayName || handle || "Unknown Bluesky account";
+    const profileUrl = handle
+      ? `https://bsky.app/profile/${encodeURIComponent(handle)}`
+      : post.permalink;
     const similarity = Math.max(
       0,
-      ...brandNames.map((brand) => {
-        const account = normalizeComparableName(author);
-        return account.includes(brand)
-          ? 1
-          : lookalikeDetectionService.similarityRatio(brand, account);
-      }),
+      ...[author, handle].flatMap((accountName) =>
+        brandNames.map((brand) => {
+          const account = normalizeComparableName(accountName);
+          if (!account) return 0;
+          return account.includes(brand)
+            ? 1
+            : lookalikeDetectionService.similarityRatio(brand, account);
+        }),
+      ),
     );
-    const text = `${post.title} ${post.selftext}`;
+    const text = post.text;
     const suspicious = isScamContent(text);
     const matchAsset = findOfficialMatch(
-      { platform: "reddit", identifier: author, url: profileUrl },
+      { platform: "bluesky", identifier: handle, url: profileUrl },
       assets,
     );
     const evidence: StoredCandidateInput["evidence"] = [
@@ -110,11 +119,13 @@ function socialCandidates(
         type: "SOCIAL_SEARCH_RESULT",
         severity: "LOW",
         details: {
-          source: "Reddit public discussion search",
+          source: "Bluesky public post search",
           statement: "A matching public discussion was found; this alone does not establish account impersonation.",
-          title: post.title,
-          subreddit: post.subreddit,
-          permalink: post.permalink,
+          text: post.text.slice(0, 1000),
+          handle,
+          postUrl: post.permalink,
+          createdAt: post.createdAt,
+          likeCount: post.likeCount,
         },
       },
     ];
@@ -123,7 +134,7 @@ function socialCandidates(
         type: "NAME_LOOKALIKE",
         severity: similarity >= 0.85 ? "MEDIUM" : "LOW",
         similarity,
-        details: { accountName: author, matchedBrandName: brandName, similarity },
+        details: { accountName: author, accountHandle: handle, matchedBrandName: brandName, similarity },
       });
     }
     if (suspicious) {
@@ -141,8 +152,8 @@ function socialCandidates(
       });
     }
     candidates.push({
-      platform: "reddit",
-      identifier: author,
+      platform: "bluesky",
+      identifier: handle || post.id,
       url: profileUrl,
       name: author,
       description: text.slice(0, 1000),
@@ -225,65 +236,135 @@ function socialCandidates(
 }
 
 export class MonitoringService {
-  private async persistCandidate(runId: string, brandId: string, candidate: StoredCandidateInput): Promise<string> {
-    const inserted = await query<{ id: string }>(
-      `INSERT INTO discovered_candidates (
-        run_id, brand_id, platform, candidate_identifier, candidate_url,
-        display_name, developer_publisher, description, icon_or_logo_url, is_excluded_official
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      RETURNING id;`,
-      [
-        runId,
-        brandId,
-        candidate.platform,
-        candidate.identifier,
-        candidate.url,
-        candidate.name,
-        candidate.publisher ?? null,
-        candidate.description ?? null,
-        candidate.iconUrl ?? null,
-        candidate.excluded,
-      ],
-    );
-    const id = inserted.rows[0]?.id;
-    if (!id) throw new Error("Monitoring candidate was not persisted");
+  /**
+   * Persists a whole scan in one transaction with set-based inserts. The old
+   * per-row loop issued 3-4 round-trips per candidate, which is what made large
+   * findings pages slow to accumulate.
+   */
+  private async persistCandidates(
+    runId: string,
+    brandId: string,
+    candidates: StoredCandidateInput[],
+  ): Promise<void> {
+    if (candidates.length === 0) return;
 
-    for (const evidence of candidate.evidence) {
-      await query(
-        `INSERT INTO candidate_evidence (candidate_id, evidence_type, severity, details, similarity_score)
-         VALUES ($1, $2, $3, $4, $5);`,
-        [id, evidence.type, evidence.severity, JSON.stringify(evidence.details), evidence.similarity ?? null],
-      );
-    }
-    const riskLevel = candidate.excluded
-      ? "BENIGN"
-      : candidate.riskScore >= 75
-        ? "HIGH"
-        : candidate.riskScore >= 40
-          ? "MEDIUM"
-          : "LOW";
-    await query(
-      `INSERT INTO risk_assessments (
-        candidate_id, risk_level, risk_score, overall_score, severity, confidence_score, primary_reasons, status
-      ) VALUES ($1, $2, $3, $3, $4, $5, $6, $7);`,
-      [
-        id,
-        riskLevel,
-        candidate.riskScore,
-        riskLevel === "BENIGN" ? "LOW" : riskLevel,
-        candidate.confidence,
-        candidate.evidence.map((evidence) => evidence.type),
-        candidate.excluded ? "RESOLVED" : "UNRESOLVED",
-      ],
+    const rows = candidates.map((candidate) => {
+      const riskLevel = candidate.excluded
+        ? "BENIGN"
+        : candidate.riskScore >= 75
+          ? "HIGH"
+          : candidate.riskScore >= 40
+            ? "MEDIUM"
+            : "LOW";
+
+      return {
+        id: randomUUID(),
+        run_id: runId,
+        brand_id: brandId,
+        platform: candidate.platform,
+        candidate_identifier: candidate.identifier,
+        candidate_url: candidate.url,
+        display_name: candidate.name,
+        developer_publisher: candidate.publisher ?? null,
+        description: candidate.description ?? null,
+        icon_or_logo_url: candidate.iconUrl ?? null,
+        is_excluded_official: candidate.excluded,
+        risk_level: riskLevel,
+        risk_score: candidate.riskScore,
+        confidence_score: candidate.confidence,
+        primary_reasons: candidate.evidence.map((evidence) => evidence.type),
+        status: candidate.excluded ? "RESOLVED" : "UNRESOLVED",
+        severity: riskLevel === "BENIGN" ? "LOW" : riskLevel,
+        asset_id: candidate.matchAsset?.id ?? null,
+        matched_by:
+          candidate.platform === "apple_app_store" || candidate.platform === "google_play"
+            ? "APP_ID_OR_URL"
+            : "EXACT_IDENTIFIER_OR_URL",
+      };
+    });
+
+    const evidenceRows = candidates.flatMap((candidate, index) =>
+      candidate.evidence.map((evidence) => ({
+        candidate_id: rows[index]?.id ?? "",
+        evidence_type: evidence.type,
+        severity: evidence.severity,
+        details: evidence.details,
+        similarity_score: evidence.similarity ?? null,
+      })),
     );
-    if (candidate.matchAsset) {
-      await query(
-        `INSERT INTO official_asset_matches (candidate_id, asset_id, matched_by)
-         VALUES ($1, $2, $3);`,
-        [id, candidate.matchAsset.id, candidate.platform === "apple_app_store" ? "APP_ID_OR_URL" : "EXACT_IDENTIFIER_OR_URL"],
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO discovered_candidates (
+           id, run_id, brand_id, platform, candidate_identifier, candidate_url,
+           display_name, developer_publisher, description, icon_or_logo_url, is_excluded_official
+         )
+         SELECT id, run_id, brand_id, platform, candidate_identifier, candidate_url,
+                display_name, developer_publisher, description, icon_or_logo_url, is_excluded_official
+         FROM jsonb_to_recordset($1::jsonb) AS x(
+           id uuid, run_id uuid, brand_id uuid, platform text, candidate_identifier text,
+           candidate_url text, display_name text, developer_publisher text, description text,
+           icon_or_logo_url text, is_excluded_official boolean
+         );`,
+        [JSON.stringify(rows)],
       );
-    }
-    return id;
+
+      if (evidenceRows.length > 0) {
+        await client.query(
+          `INSERT INTO candidate_evidence (candidate_id, evidence_type, severity, details, similarity_score)
+           SELECT candidate_id, evidence_type, severity, details, similarity_score
+           FROM jsonb_to_recordset($1::jsonb) AS x(
+             candidate_id uuid, evidence_type text, severity text, details jsonb, similarity_score numeric
+           );`,
+          [JSON.stringify(evidenceRows)],
+        );
+      }
+
+      await client.query(
+        `INSERT INTO risk_assessments (
+           candidate_id, risk_level, risk_score, overall_score, severity, confidence_score, primary_reasons, status
+         )
+         SELECT candidate_id, risk_level, risk_score, risk_score, severity, confidence_score,
+                ARRAY(SELECT jsonb_array_elements_text(primary_reasons)), status
+         FROM jsonb_to_recordset($1::jsonb) AS x(
+           candidate_id uuid, risk_level text, risk_score numeric, severity text,
+           confidence_score numeric, primary_reasons jsonb, status text
+         );`,
+        [
+          JSON.stringify(
+            rows.map((row) => ({
+              candidate_id: row.id,
+              risk_level: row.risk_level,
+              risk_score: row.risk_score,
+              severity: row.severity,
+              confidence_score: row.confidence_score,
+              primary_reasons: row.primary_reasons,
+              status: row.status,
+            })),
+          ),
+        ],
+      );
+
+      const matches = rows.filter((row) => row.asset_id);
+      if (matches.length > 0) {
+        await client.query(
+          `INSERT INTO official_asset_matches (candidate_id, asset_id, matched_by)
+           SELECT candidate_id, asset_id, matched_by
+           FROM jsonb_to_recordset($1::jsonb) AS x(
+             candidate_id uuid, asset_id uuid, matched_by text
+           );`,
+          [
+            JSON.stringify(
+              matches.map((row) => ({
+                candidate_id: row.id,
+                asset_id: row.asset_id,
+                matched_by: row.matched_by,
+              })),
+            ),
+          ],
+        );
+      }
+    });
   }
 
   async runBrandScan(brandId: string): Promise<MonitoringScanSummary> {
@@ -314,230 +395,395 @@ export class MonitoringService {
       sourceStatuses: [],
     };
 
-    const [socialResult, appResult] = await Promise.allSettled([
-      socialMonitoringService.scanBrandMentions({
-        brandName: brand.name,
-        associatedDomain: brand.primary_domain,
-      }),
-      appStoresMonitoringService.scanAppStores({
-        brandId: brand.id,
-        brandName: brand.name,
-        alternateNames: brand.alternate_names ?? [],
-      }),
-    ]);
+    try {
+      // Every source runs under its own deadline. A slow provider now yields a
+      // partial scan with an explicit "unavailable" status instead of blocking
+      // the request until the HTTP layer times out.
+      const sourceTimeoutMs = config.MONITORING_SOURCE_TIMEOUT_MS;
+      const [socialOutcome, appOutcome] = await Promise.all([
+        runWithDeadline(
+          () =>
+            socialMonitoringService.scanBrandMentions({
+              brandName: brand.name,
+              associatedDomain: brand.primary_domain,
+            }),
+          sourceTimeoutMs,
+          "Social monitoring",
+        ),
+        runWithDeadline(
+          () =>
+            appStoresMonitoringService.scanAppStores({
+              brandId: brand.id,
+              brandName: brand.name,
+              alternateNames: brand.alternate_names ?? [],
+            }),
+          sourceTimeoutMs,
+          "App-store monitoring",
+        ),
+      ]);
 
-    const sourceCandidates: StoredCandidateInput[] = [];
-    if (socialResult.status === "fulfilled") {
-      const social = socialResult.value;
-      summary.socialThreats = social.signals.length;
-      summary.sourceStatuses.push(...social.sources);
-      sourceCandidates.push(...socialCandidates(social, brand.name, brand.alternate_names ?? [], assets));
-      if (social.impersonationDetected && social.overallThreatScore >= 65) {
-        const alert = await alertsService.createAlert({
-          brandId: brand.id,
-          severity: social.overallThreatScore >= 85 ? "critical" : "high",
-          title: `Potential social impersonation activity for ${brand.name}`,
-          description: `Public social search returned ${social.signals.length} suspicious-content indicators. Account identity is not confirmed by this result.`,
-          evidenceSnapshot: { signals: social.signals },
+      const socialResult = socialOutcome.value
+        ? ({ status: "fulfilled", value: socialOutcome.value } as const)
+        : ({ status: "rejected", reason: new Error(socialOutcome.error ?? "Social source failed") } as const);
+      const appResult = appOutcome.value
+        ? ({ status: "fulfilled", value: appOutcome.value } as const)
+        : ({ status: "rejected", reason: new Error(appOutcome.error ?? "App-store source failed") } as const);
+
+      const sourceCandidates: StoredCandidateInput[] = [];
+      if (socialResult.status === "fulfilled") {
+        const social = socialResult.value;
+        summary.socialThreats = social.signals.length;
+        summary.sourceStatuses.push(...social.sources);
+        sourceCandidates.push(...socialCandidates(social, brand.name, brand.alternate_names ?? [], assets));
+        if (social.impersonationDetected && social.overallThreatScore >= 65) {
+          const alert = await alertsService.createAlert({
+            brandId: brand.id,
+            severity: social.overallThreatScore >= 85 ? "critical" : "high",
+            title: `Potential social impersonation activity for ${brand.name}`,
+            description: `Public social search returned ${social.signals.length} suspicious-content indicators. Account identity is not confirmed by this result.`,
+            evidenceSnapshot: { signals: social.signals },
+          });
+          if (alert) summary.alertsGenerated++;
+        }
+      } else {
+        summary.sourceStatuses.push({
+          source: "social_search",
+          status: "unavailable",
+          candidatesFound: 0,
+          error: socialResult.reason instanceof Error ? socialResult.reason.message : "Social source failed",
         });
-        if (alert) summary.alertsGenerated++;
       }
-    } else {
-      summary.sourceStatuses.push({
-        source: "social_search",
-        status: "unavailable",
-        candidatesFound: 0,
-        error: socialResult.reason instanceof Error ? socialResult.reason.message : "Social source failed",
-      });
-    }
 
-    if (appResult.status === "fulfilled") {
-      const apps: AppStoreScanResult = appResult.value;
-      summary.unauthorizedApps = apps.unauthorizedAppsCount;
-      summary.sourceStatuses.push(...apps.sources);
-      summary.sourceStatuses.push({
-        source: "registered_logo_comparison",
-        status: apps.logoComparisons.notConfigured > 0
-          ? "not_configured"
-          : apps.logoComparisons.unavailable > 0
-            ? "unavailable"
-            : "available",
-        candidatesFound: apps.logoComparisons.compared,
-        ...(apps.logoComparisons.unavailable > 0
-          ? { error: `${apps.logoComparisons.unavailable} image comparison(s) could not be completed.` }
-          : apps.logoComparisons.notConfigured > 0
-            ? { error: "Register a verified logo URL to enable image comparison." }
-            : {}),
-      });
-      for (const finding of apps.findings) {
-        const matchAsset = findOfficialMatch(
-          { platform: finding.store, identifier: finding.appId, url: finding.storeUrl },
-          assets,
-        );
-        sourceCandidates.push({
-          platform: finding.store,
-          identifier: finding.appId,
-          url: finding.storeUrl,
-          name: finding.title,
-          publisher: finding.developer,
-          description: finding.description,
-          iconUrl: finding.iconUrl,
-          riskScore: matchAsset ? 0 : finding.riskScore,
-          confidence: finding.lookalikeSimilarity >= 0.85 ? 0.8 : 0.55,
-          excluded: Boolean(matchAsset) || finding.isExcludedOfficial,
-          ...(matchAsset ? { matchAsset } : {}),
-          evidence: [
-            {
-              type: "APP_NAME_SIMILARITY",
-              severity: finding.lookalikeSimilarity >= 0.85 ? "MEDIUM" : "LOW",
-              similarity: finding.lookalikeSimilarity,
-              details: { similarity: finding.lookalikeSimilarity, title: finding.title },
-            },
-            ...(finding.evidence.map((reason) => ({
-              type: reason.includes("Publisher") ? "PUBLISHER_MISMATCH" : "APP_LISTING_EVIDENCE",
-              severity: reason.includes("Publisher") ? "MEDIUM" as const : "LOW" as const,
-              details: { reason },
-            }))),
-            ...(finding.logoSimilarity === null
-              ? []
-              : [{
-                  type: "LOGO_SIMILARITY",
-                  severity: finding.logoSimilarity >= 0.82 ? "HIGH" as const : "LOW" as const,
-                  similarity: finding.logoSimilarity,
-                  details: {
+      if (appResult.status === "fulfilled") {
+        const apps: AppStoreScanResult = appResult.value;
+        summary.unauthorizedApps = apps.unauthorizedAppsCount;
+        summary.sourceStatuses.push(...apps.sources);
+        summary.sourceStatuses.push({
+          source: "registered_logo_comparison",
+          status: apps.logoComparisons.notConfigured > 0
+            ? "not_configured"
+            : apps.logoComparisons.unavailable > 0
+              ? "unavailable"
+              : "available",
+          candidatesFound: apps.logoComparisons.compared,
+          ...(apps.logoComparisons.unavailable > 0
+            ? { error: `${apps.logoComparisons.unavailable} image comparison(s) could not be completed.` }
+            : apps.logoComparisons.notConfigured > 0
+              ? { error: "Register a verified logo URL to enable image comparison." }
+              : {}),
+        });
+        for (const finding of apps.findings) {
+          const matchAsset = findOfficialMatch(
+            { platform: finding.store, identifier: finding.appId, url: finding.storeUrl },
+            assets,
+          );
+          sourceCandidates.push({
+            platform: finding.store,
+            identifier: finding.appId,
+            url: finding.storeUrl,
+            name: finding.title,
+            publisher: finding.developer,
+            description: finding.description,
+            iconUrl: finding.iconUrl,
+            riskScore: matchAsset ? 0 : finding.riskScore,
+            confidence: finding.lookalikeSimilarity >= 0.85 ? 0.8 : 0.55,
+            excluded: Boolean(matchAsset) || finding.isExcludedOfficial,
+            ...(matchAsset ? { matchAsset } : {}),
+            evidence: [
+              {
+                type: "APP_NAME_SIMILARITY",
+                severity: finding.lookalikeSimilarity >= 0.85 ? "MEDIUM" : "LOW",
+                similarity: finding.lookalikeSimilarity,
+                details: { similarity: finding.lookalikeSimilarity, title: finding.title },
+              },
+              ...(finding.evidence.map((reason) => ({
+                type: reason.includes("Publisher") ? "PUBLISHER_MISMATCH" : "APP_LISTING_EVIDENCE",
+                severity: reason.includes("Publisher") ? "MEDIUM" as const : "LOW" as const,
+                details: { reason },
+              }))),
+              ...(finding.logoSimilarity === null
+                ? []
+                : [{
+                    type: "LOGO_SIMILARITY",
+                    severity: finding.logoSimilarity >= 0.82 ? "HIGH" as const : "LOW" as const,
                     similarity: finding.logoSimilarity,
-                    method: "8x8 grayscale average hash",
-                  },
-                }]),
-            ...(finding.logoComparisonStatus === "unavailable"
-              ? [{
-                  type: "LOGO_ASSESSMENT_UNAVAILABLE",
-                  severity: "LOW" as const,
-                  details: { reason: "The registered logo or app icon could not be retrieved safely." },
-                }]
-              : []),
-            ...(matchAsset
-              ? [{
-                  type: "OFFICIAL_ASSET_MATCH",
-                  severity: "LOW" as const,
-                  details: { assetId: matchAsset.id, reason: "Exact registered application ID or official store URL." },
-                }]
-              : []),
-          ],
+                    details: {
+                      similarity: finding.logoSimilarity,
+                      method: "8x8 grayscale average hash",
+                    },
+                  }]),
+              ...(finding.logoComparisonStatus === "unavailable"
+                ? [{
+                    type: "LOGO_ASSESSMENT_UNAVAILABLE",
+                    severity: "LOW" as const,
+                    details: { reason: "The registered logo or app icon could not be retrieved safely." },
+                  }]
+                : []),
+              ...(matchAsset
+                ? [{
+                    type: "OFFICIAL_ASSET_MATCH",
+                    severity: "LOW" as const,
+                    details: { assetId: matchAsset.id, reason: "Exact registered application ID or official store URL." },
+                  }]
+                : []),
+            ],
+          });
+        }
+        if (apps.hasCriticalImpersonation) {
+          const alert = await alertsService.createAlert({
+            brandId: brand.id,
+            severity: "critical",
+            title: `Potential app-store impersonation for ${brand.name}`,
+            description: "A listing has multiple elevated indicators. Confirm the publisher and listing before treating it as malicious.",
+            evidenceSnapshot: { findings: apps.findings.filter((finding) => finding.riskScore >= 65) },
+          });
+          if (alert) summary.alertsGenerated++;
+        }
+      } else {
+        summary.sourceStatuses.push({
+          source: "app_store",
+          status: "unavailable",
+          candidatesFound: 0,
+          error: appResult.reason instanceof Error ? appResult.reason.message : "App-store source failed",
         });
       }
-      if (apps.hasCriticalImpersonation) {
-        const alert = await alertsService.createAlert({
-          brandId: brand.id,
-          severity: "critical",
-          title: `Potential app-store impersonation for ${brand.name}`,
-          description: "A listing has multiple elevated indicators. Confirm the publisher and listing before treating it as malicious.",
-          evidenceSnapshot: { findings: apps.findings.filter((finding) => finding.riskScore >= 65) },
-        });
-        if (alert) summary.alertsGenerated++;
-      }
-    } else {
+
+      const persistStartedAt = Date.now();
+      await this.persistCandidates(runId, brand.id, sourceCandidates);
+      summary.candidatesFound = sourceCandidates.length;
+      summary.excludedOfficialAssets = sourceCandidates.filter((candidate) => candidate.excluded).length;
+      logger.info("[monitoring] Candidates persisted", {
+        runId,
+        candidates: sourceCandidates.length,
+        persistMs: Date.now() - persistStartedAt,
+      });
+      summary.sourceStatuses = summary.sourceStatuses.map((source) => ({ ...source }));
+      const sourceErrors = summary.sourceStatuses
+        .filter((source) => source.status === "unavailable")
+        .map(({ source, error }) => ({ source, error: error ?? "Source unavailable" }));
+
+      await query(
+        `UPDATE monitoring_runs
+         SET status = 'COMPLETED', source_errors = $2, summary = $3, completed_at = NOW()
+         WHERE id = $1;`,
+        [runId, JSON.stringify(sourceErrors), JSON.stringify(summary)],
+      );
+      await query(
+        `INSERT INTO monitoring_jobs (
+          brand_id, job_type, status, findings_count, threats_detected, details, started_at, completed_at
+         ) VALUES ($1, 'full_scan', 'completed', $2, $3, $4, $5, NOW());`,
+        [
+          brand.id,
+          summary.candidatesFound,
+          summary.candidatesFound - summary.excludedOfficialAssets,
+          JSON.stringify(summary),
+          startedAt,
+        ],
+      );
+
+      logger.info("[monitoring] Brand monitoring run completed", { summary });
+      return summary;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Monitoring run failed";
       summary.sourceStatuses.push({
-        source: "app_store",
+        source: "monitoring_run",
         status: "unavailable",
         candidatesFound: 0,
-        error: appResult.reason instanceof Error ? appResult.reason.message : "App-store source failed",
+        error: message,
       });
+      try {
+        await query(
+          `UPDATE monitoring_runs
+           SET status = 'FAILED', source_errors = $2, summary = $3, completed_at = NOW()
+           WHERE id = $1;`,
+          [
+            runId,
+            JSON.stringify([{ source: "monitoring_run", error: message }]),
+            JSON.stringify(summary),
+          ],
+        );
+      } catch (statusError) {
+        logger.error("[monitoring] Failed to mark monitoring run as failed", {
+          runId,
+          error: statusError instanceof Error ? statusError.message : "Unknown error",
+        });
+      }
+      throw error;
     }
-
-    for (const candidate of sourceCandidates) {
-      await this.persistCandidate(runId, brand.id, candidate);
-      summary.candidatesFound++;
-      if (candidate.excluded) summary.excludedOfficialAssets++;
-    }
-    summary.sourceStatuses = summary.sourceStatuses.map((source) => ({ ...source }));
-    const sourceErrors = summary.sourceStatuses
-      .filter((source) => source.status === "unavailable")
-      .map(({ source, error }) => ({ source, error: error ?? "Source unavailable" }));
-
-    await query(
-      `UPDATE monitoring_runs
-       SET status = 'COMPLETED', source_errors = $2, summary = $3, completed_at = NOW()
-       WHERE id = $1;`,
-      [runId, JSON.stringify(sourceErrors), JSON.stringify(summary)],
-    );
-    await query(
-      `INSERT INTO monitoring_jobs (
-        brand_id, job_type, status, findings_count, threats_detected, details, started_at, completed_at
-       ) VALUES ($1, 'full_scan', 'completed', $2, $3, $4, $5, NOW());`,
-      [
-        brand.id,
-        summary.candidatesFound,
-        summary.candidatesFound - summary.excludedOfficialAssets,
-        JSON.stringify(summary),
-        startedAt,
-      ],
-    );
-
-    logger.info("[monitoring] Brand monitoring run completed", { summary });
-    return summary;
   }
 
-  async getCandidates(brandId?: string): Promise<Record<string, unknown>[]> {
-    const values: string[] = [];
-    const brandFilter = brandId ? "WHERE c.brand_id = $1" : "";
-    if (brandId) values.push(brandId);
+  /**
+   * Returns candidates for a brand/run. The previous implementation joined
+   * candidate_evidence to the candidate list and then ran three correlated
+   * subqueries per row, which multiplied rows and exceeded the 20 s UI budget
+   * at 500 candidates. This version pages first, then aggregates only the
+   * evidence belonging to that page.
+   */
+  async getCandidates(
+    brandId?: string,
+    runId?: string,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<Record<string, unknown>[]> {
+    const limit = Math.max(1, Math.min(options.limit ?? 200, 500));
+    const offset = Math.max(0, options.offset ?? 0);
+    const values: Array<string | number> = [];
+    const filters: string[] = [];
+
+    if (brandId) {
+      values.push(brandId);
+      filters.push(`c.brand_id = $${values.length}::uuid`);
+    }
+    if (runId) {
+      values.push(runId);
+      filters.push(`c.run_id = $${values.length}::uuid`);
+    }
+
+    const whereClause = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    values.push(limit);
+    const limitParam = `$${values.length}`;
+    values.push(offset);
+    const offsetParam = `$${values.length}`;
+
     const result = await query(
-      `SELECT
-         c.id, c.brand_id, c.platform, c.candidate_identifier AS identifier,
-         c.candidate_url AS url, c.display_name AS name,
-         c.developer_publisher AS publisher, c.description, c.icon_or_logo_url,
-         c.is_excluded_official AS is_official_excluded, c.discovered_at AS created_at,
+      `WITH page AS (
+         SELECT c.id, c.brand_id, c.run_id, c.platform, c.candidate_identifier,
+                c.candidate_url, c.display_name, c.developer_publisher,
+                c.description, c.icon_or_logo_url, c.is_excluded_official, c.discovered_at
+         FROM discovered_candidates c
+         ${whereClause}
+         ORDER BY c.discovered_at DESC
+         LIMIT ${limitParam} OFFSET ${offsetParam}
+       ),
+       evidence AS (
+         SELECT ce.candidate_id,
+                MAX(ce.similarity_score) FILTER (
+                  WHERE ce.evidence_type IN ('NAME_LOOKALIKE', 'APP_NAME_SIMILARITY')
+                )::float AS name_similarity,
+                MAX(ce.similarity_score) FILTER (
+                  WHERE ce.evidence_type = 'LOGO_SIMILARITY'
+                )::float AS logo_similarity,
+                BOOL_OR(ce.evidence_type = 'PUBLISHER_MISMATCH') AS publisher_mismatch,
+                (ARRAY_AGG(ce.evidence_type ORDER BY ce.recorded_at DESC) FILTER (
+                  WHERE ce.evidence_type IN ('NAME_LOOKALIKE', 'APP_NAME_SIMILARITY')
+                ))[1] AS lookalike_technique,
+                jsonb_agg(
+                  jsonb_build_object('type', ce.evidence_type, 'severity', ce.severity, 'details', ce.details)
+                  ORDER BY ce.recorded_at ASC
+                ) AS source_evidence
+         FROM candidate_evidence ce
+         WHERE ce.candidate_id IN (SELECT id FROM page)
+         GROUP BY ce.candidate_id
+       ),
+       latest_risk AS (
+         SELECT DISTINCT ON (ra.candidate_id)
+                ra.candidate_id, ra.risk_level, ra.risk_score, ra.confidence_score, ra.primary_reasons
+         FROM risk_assessments ra
+         WHERE ra.candidate_id IN (SELECT id FROM page)
+         ORDER BY ra.candidate_id, ra.assessed_at DESC
+       )
+       SELECT
+         p.id,
+         p.brand_id,
+         p.run_id,
+         p.platform,
+         p.candidate_identifier AS identifier,
+         p.candidate_url AS url,
+         p.display_name AS name,
+         p.developer_publisher AS publisher,
+         p.description,
+         p.icon_or_logo_url,
+         p.is_excluded_official AS is_official_excluded,
+         p.discovered_at AS created_at,
          CASE
-           WHEN c.platform IN ('reddit', 'youtube') THEN 'social'
-           WHEN c.platform = 'apple_app_store' THEN 'app_store'
-           ELSE c.platform
+           -- Keep historical Reddit candidate rows in the social category.
+           WHEN p.platform IN ('reddit', 'bluesky', 'youtube') THEN 'social'
+           WHEN p.platform IN ('apple_app_store', 'google_play', 'play_store') THEN 'app_store'
+           ELSE p.platform
          END AS source_type,
-         COALESCE(ra.risk_level, 'UNASSESSED') AS risk_level,
-         COALESCE(ra.risk_score, 0)::float AS risk_score,
-         COALESCE(ra.confidence_score, 0) AS confidence_score,
-         COALESCE(ra.primary_reasons, ARRAY[]::TEXT[]) AS risk_reasons,
+         COALESCE(lr.risk_level, 'UNASSESSED') AS risk_level,
+         COALESCE(lr.risk_score, 0)::float AS risk_score,
+         COALESCE(lr.confidence_score, 0) AS confidence_score,
+         COALESCE(lr.primary_reasons, ARRAY[]::TEXT[]) AS risk_reasons,
          jsonb_build_object(
-           'name_similarity', (
-             SELECT MAX(similarity_score)::float FROM candidate_evidence
-             WHERE candidate_id = c.id AND evidence_type IN ('NAME_LOOKALIKE', 'APP_NAME_SIMILARITY')
-           ),
-           'logo_similarity', (
-             SELECT MAX(similarity_score)::float FROM candidate_evidence
-             WHERE candidate_id = c.id AND evidence_type = 'LOGO_SIMILARITY'
-           ),
-           'publisher_mismatch', EXISTS (
-             SELECT 1 FROM candidate_evidence
-             WHERE candidate_id = c.id AND evidence_type = 'PUBLISHER_MISMATCH'
-           ),
-           'lookalike_technique', (
-             SELECT evidence_type FROM candidate_evidence
-             WHERE candidate_id = c.id AND evidence_type IN ('NAME_LOOKALIKE', 'APP_NAME_SIMILARITY')
-             ORDER BY recorded_at DESC LIMIT 1
-           )
+           'name_similarity', e.name_similarity,
+           'logo_similarity', e.logo_similarity,
+           'publisher_mismatch', COALESCE(e.publisher_mismatch, false),
+           'lookalike_technique', e.lookalike_technique
          ) AS evidence,
-         COALESCE(
-           (SELECT jsonb_agg(jsonb_build_object(
-              'type', evidence_type, 'severity', severity, 'details', details
-            ) ORDER BY recorded_at ASC)
-            FROM candidate_evidence WHERE candidate_id = c.id),
-           '[]'::jsonb
-         ) AS source_evidence
-       FROM discovered_candidates c
-       LEFT JOIN LATERAL (
-         SELECT risk_level, risk_score, confidence_score, primary_reasons
-         FROM risk_assessments
-         WHERE candidate_id = c.id
-         ORDER BY assessed_at DESC LIMIT 1
-       ) ra ON TRUE
-       LEFT JOIN candidate_evidence ce ON ce.candidate_id = c.id
-       ${brandFilter}
-       GROUP BY c.id, ra.risk_level, ra.risk_score, ra.confidence_score, ra.primary_reasons
-       ORDER BY c.discovered_at DESC
-       LIMIT 500;`,
+         COALESCE(e.source_evidence, '[]'::jsonb) AS source_evidence
+       FROM page p
+       LEFT JOIN evidence e ON e.candidate_id = p.id
+       LEFT JOIN latest_risk lr ON lr.candidate_id = p.id
+       ORDER BY p.discovered_at DESC;`,
       values,
     );
+
     return result.rows;
+  }
+
+  /**
+   * Fast counters used by dashboards and the agent, so a 500-row findings page
+   * does not need to be rendered just to learn the totals.
+   */
+  async getCandidatesSummary(brandId?: string): Promise<{
+    total: number;
+    excluded: number;
+    highRisk: number;
+    mediumRisk: number;
+    unassessed: number;
+    byPlatform: Record<string, number>;
+  }> {
+    const values: string[] = [];
+    const whereClause = brandId ? `WHERE c.brand_id = $1::uuid` : "";
+    if (brandId) values.push(brandId);
+
+    const result = await query<{
+      total: string;
+      excluded: string;
+      high_risk: string;
+      medium_risk: string;
+      unassessed: string;
+      by_platform?: Record<string, number> | null;
+    }>(
+      `WITH latest_risk AS (
+         SELECT DISTINCT ON (candidate_id) candidate_id, risk_level
+         FROM risk_assessments
+         ORDER BY candidate_id, assessed_at DESC
+       ),
+       totals AS (
+         SELECT
+           COUNT(*)::text AS total,
+           COUNT(*) FILTER (WHERE c.is_excluded_official)::text AS excluded,
+           COUNT(*) FILTER (WHERE COALESCE(lr.risk_level, 'UNASSESSED') IN ('HIGH', 'CRITICAL'))::text AS high_risk,
+           COUNT(*) FILTER (WHERE COALESCE(lr.risk_level, 'UNASSESSED') = 'MEDIUM')::text AS medium_risk,
+           COUNT(*) FILTER (WHERE COALESCE(lr.risk_level, 'UNASSESSED') = 'UNASSESSED')::text AS unassessed
+         FROM discovered_candidates c
+         LEFT JOIN latest_risk lr ON lr.candidate_id = c.id
+         ${whereClause}
+       ),
+       platforms AS (
+         SELECT COALESCE(jsonb_object_agg(platform, count_value), '{}'::jsonb) AS by_platform
+         FROM (
+           SELECT c.platform, COUNT(*)::int AS count_value
+           FROM discovered_candidates c
+           ${whereClause}
+           GROUP BY c.platform
+         ) grouped
+       )
+       SELECT totals.*, platforms.by_platform
+       FROM totals, platforms;`,
+      values,
+    );
+
+    const row = result.rows[0];
+    return {
+      total: Number(row?.total ?? 0),
+      excluded: Number(row?.excluded ?? 0),
+      highRisk: Number(row?.high_risk ?? 0),
+      mediumRisk: Number(row?.medium_risk ?? 0),
+      unassessed: Number(row?.unassessed ?? 0),
+      byPlatform: (row?.by_platform ?? {}) as Record<string, number>,
+    };
   }
 
   async getLatestRun(brandId: string): Promise<Record<string, unknown> | null> {

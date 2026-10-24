@@ -1,5 +1,5 @@
 import { query, withTransaction } from "./db";
-import type { QueryResultRow } from "pg";
+import type { PoolClient, QueryResultRow } from "pg";
 
 export interface InvestigationRecord extends QueryResultRow {
   id: string;
@@ -58,6 +58,10 @@ export interface ExclusionRuleRecord extends QueryResultRow {
   reason: string | null;
   is_active: boolean;
   created_at: string;
+  asset_id?: string | null;
+  brand_id?: string | null;
+  asset_type?: string | null;
+  asset_value?: string | null;
 }
 
 export interface BrandAssetRecord extends QueryResultRow {
@@ -69,6 +73,20 @@ export interface BrandAssetRecord extends QueryResultRow {
   value: string;
   canonical_url: string | null;
   is_verified: boolean;
+  verification_status?:
+    | "PENDING_VERIFICATION"
+    | "VERIFIED"
+    | "VERIFIED_LEGACY"
+    | "REJECTED"
+    | "REVOKED";
+  verification_method?: string | null;
+  verification_evidence?: Record<string, unknown>;
+  verified_at?: string | null;
+  verified_by?: string | null;
+  revoked_at?: string | null;
+  revocation_reason?: string | null;
+  safety_status?: "NOT_ASSESSED" | "NO_THREAT_MATCH" | "THREAT_DETECTED";
+  safety_evidence?: Record<string, unknown>;
   metadata: Record<string, unknown>;
   image_data?: Buffer | null;
   created_at: string;
@@ -244,24 +262,50 @@ export const AuditLogsRepository = {
    Exclusion Rules Repository
    ========================================================================== */
 export const ExclusionRulesRepository = {
-  async listActive(): Promise<ExclusionRuleRecord[]> {
+  async listActive(brandId?: string): Promise<ExclusionRuleRecord[]> {
+    if (!brandId) return [];
     const res = await query<ExclusionRuleRecord>(
-      `SELECT * FROM exclusion_rules WHERE is_active = true;`
+      `SELECT r.id, r.pattern, r.reason, r.is_active, r.created_at,
+              r.asset_id, r.brand_id, a.asset_type, a.value AS asset_value
+       FROM exclusion_rules r
+       INNER JOIN official_assets a ON a.id = r.asset_id
+       WHERE r.is_active = TRUE
+         AND r.brand_id = $1 AND a.brand_id = $1
+         AND a.is_verified = TRUE
+         AND a.verification_status IN ('VERIFIED', 'VERIFIED_LEGACY');`,
+      [brandId],
     );
     return res.rows;
   },
 
-  async addRule(pattern: string, reason?: string): Promise<ExclusionRuleRecord> {
+  async addRule(
+    pattern: string,
+    reason: string | undefined,
+    assetId: string,
+    brandId: string,
+    client?: PoolClient,
+  ): Promise<ExclusionRuleRecord> {
     const text = `
-      INSERT INTO exclusion_rules (pattern, reason, is_active)
-      VALUES ($1, $2, true)
-      ON CONFLICT (pattern) DO UPDATE SET reason = EXCLUDED.reason, is_active = true
-      RETURNING *;
+      INSERT INTO exclusion_rules (pattern, reason, is_active, asset_id, brand_id)
+      SELECT $1, $2, TRUE, a.id, a.brand_id
+      FROM official_assets a
+      WHERE a.id = $3 AND a.brand_id = $4
+        AND a.is_verified = TRUE
+        AND a.verification_status IN ('VERIFIED', 'VERIFIED_LEGACY')
+      ON CONFLICT (pattern) DO UPDATE SET
+        reason = EXCLUDED.reason,
+        is_active = TRUE,
+        asset_id = EXCLUDED.asset_id,
+        brand_id = EXCLUDED.brand_id
+      RETURNING id, pattern, reason, is_active, created_at, asset_id, brand_id;
     `;
-    const res = await query<ExclusionRuleRecord>(text, [pattern, reason ?? null]);
+    const values = [pattern, reason ?? null, assetId, brandId];
+    const res = client
+      ? await client.query<ExclusionRuleRecord>(text, values)
+      : await query<ExclusionRuleRecord>(text, values);
     const row = res.rows[0];
     if (!row) {
-      throw new Error("Failed to insert exclusion rule");
+      throw new Error("Exclusion denied: the linked asset is not verified for this brand.");
     }
     return row;
   },
@@ -274,7 +318,9 @@ export const BrandAssetsRepository = {
   async findByBrandId(brandId: string, includeImageData = false): Promise<BrandAssetRecord[]> {
     const res = await query<BrandAssetRecord>(
       `SELECT id, brand_id, asset_type, platform, identifier, value, canonical_url,
-              hash_signature, is_verified, metadata, created_at
+              hash_signature, is_verified, verification_status, verification_method,
+              verification_evidence, verified_at, verified_by, revoked_at,
+              revocation_reason, safety_status, safety_evidence, metadata, created_at
        ${includeImageData ? ", image_data" : ""}
        FROM official_assets WHERE brand_id = $1 ORDER BY created_at ASC;`,
       [brandId]
@@ -294,21 +340,34 @@ export const BrandAssetsRepository = {
     is_verified?: boolean;
     metadata?: Record<string, unknown>;
   }): Promise<BrandAssetRecord> {
+    const columns = `id, brand_id, asset_type, platform, identifier, value,
+      canonical_url, hash_signature, is_verified, verification_status,
+      verification_method, verification_evidence, verified_at, verified_by,
+      revoked_at, revocation_reason, safety_status, safety_evidence, metadata, created_at`;
     const res = await query<BrandAssetRecord>(
       `INSERT INTO official_assets (
          brand_id, asset_type, platform, identifier, value, canonical_url,
-         hash_signature, image_data, is_verified, metadata
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         hash_signature, image_data, is_verified, verification_status,
+         verification_evidence, safety_status, safety_evidence, metadata
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE,
+                 'PENDING_VERIFICATION', '{}'::jsonb, 'NOT_ASSESSED', '{}'::jsonb, $9)
        ON CONFLICT (brand_id, asset_type, platform, identifier)
        DO UPDATE SET value = EXCLUDED.value,
                      canonical_url = EXCLUDED.canonical_url,
                      hash_signature = EXCLUDED.hash_signature,
                      image_data = EXCLUDED.image_data,
-                     is_verified = EXCLUDED.is_verified,
                      metadata = EXCLUDED.metadata,
+                     is_verified = FALSE,
+                     verification_status = 'PENDING_VERIFICATION',
+                     verification_method = NULL,
+                     verification_evidence = '{}'::jsonb,
+                     verified_at = NULL,
+                     verified_by = NULL,
+                     safety_status = 'NOT_ASSESSED',
+                     safety_evidence = '{}'::jsonb,
                      updated_at = NOW()
-       RETURNING id, brand_id, asset_type, platform, identifier, value,
-                 canonical_url, hash_signature, is_verified, metadata, created_at;`,
+       WHERE official_assets.verification_status IN ('PENDING_VERIFICATION', 'REJECTED')
+       RETURNING ${columns};`,
       [
         data.brand_id,
         data.asset_type,
@@ -318,11 +377,17 @@ export const BrandAssetsRepository = {
         data.canonical_url ?? null,
         data.hash_signature ?? null,
         data.image_data ?? null,
-        data.is_verified ?? false,
         JSON.stringify(data.metadata ?? {}),
       ]
     );
-    const row = res.rows[0];
+    if (res.rows[0]) return res.rows[0];
+
+    const existing = await query<BrandAssetRecord>(
+      `SELECT ${columns} FROM official_assets
+       WHERE brand_id = $1 AND asset_type = $2 AND platform = $3 AND identifier = $4;`,
+      [data.brand_id, data.asset_type, data.platform, data.identifier],
+    );
+    const row = existing.rows[0];
     if (!row) throw new Error("Failed to save official brand asset");
     return row;
   },

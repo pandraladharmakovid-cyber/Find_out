@@ -1,10 +1,12 @@
-
 import React, { useState, type FormEvent } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
   CheckCircle2,
+  CheckSquare,
   ClipboardCheck,
+  Copy,
+  Square,
   KeyRound,
   LockKeyhole,
   Network,
@@ -13,6 +15,7 @@ import {
   UserRound,
 } from 'lucide-react';
 import { apiRequest } from './api';
+import type { Translator } from './i18n';
 
 type RecoveryResult = {
   safety_verdict?: string;
@@ -25,6 +28,7 @@ type RecoveryResult = {
   delivery_channel?: string;
   device_risk?: string;
   recovery_steps?: string[];
+  evidence_note?: string;
 };
 
 const scenarios = [
@@ -49,16 +53,33 @@ const recoveryFields: {
   { key: 'device_risk', title: 'Device risk assessment', icon: Smartphone },
 ];
 
+function verdictTone(verdict?: string): { className: string; label: string } {
+  switch ((verdict || '').toLowerCase()) {
+    case 'compromised':
+      return { className: 'border-rose-500/40 bg-rose-500/10 text-rose-200', label: 'Act now' };
+    case 'safe':
+    case 'not_compromised':
+      return { className: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200', label: 'No compromise established' };
+    default:
+      return {
+        className: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+        label: 'Unverified — follow the steps anyway',
+      };
+  }
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'The assessment request failed.';
 }
 
-export const RecoveryView: React.FC<{ t: (key: string) => string }> = ({ t }) => {
+export const RecoveryView: React.FC<{ t: Translator }> = ({ t }) => {
   const [target, setTarget] = useState('');
   const [scenario, setScenario] = useState('opened_link');
   const [result, setResult] = useState<RecoveryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [doneSteps, setDoneSteps] = useState<Record<number, boolean>>({});
+  const [copied, setCopied] = useState(false);
 
   async function handleTriage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -72,6 +93,8 @@ export const RecoveryView: React.FC<{ t: (key: string) => string }> = ({ t }) =>
     setLoading(true);
     setError('');
     setResult(null);
+    setDoneSteps({});
+    setCopied(false);
 
     try {
       const response = await apiRequest<{ data?: RecoveryResult }>(
@@ -189,24 +212,50 @@ export const RecoveryView: React.FC<{ t: (key: string) => string }> = ({ t }) =>
 
       {result && (
         <section className="space-y-4" aria-live="polite">
-          <div className="surface-card p-5">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              Backend assessment
-            </p>
-            <p className="mt-3 text-lg font-semibold text-white">
-              {result.safety_verdict || 'No verdict supplied'}
-            </p>
-            <p className="mt-2 break-words text-sm text-slate-400">{target.trim()}</p>
+          <div className={`surface-card border p-5 ${verdictTone(result.safety_verdict).className}`}>
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-wider opacity-70">
+                  Security assessment
+                </p>
+                <p className="mt-1.5 text-lg font-bold capitalize">
+                  {(result.safety_verdict || 'no verdict supplied').replace(/_/g, ' ')}
+                </p>
+                <p className="mt-1 break-words text-sm opacity-80">{target.trim()}</p>
+              </div>
+              <span className="shrink-0 rounded-full border border-white/20 bg-black/20 px-3 py-1.5 text-xs font-semibold">
+                {verdictTone(result.safety_verdict).label}
+              </span>
+            </div>
 
-            {typeof result.compromised_count === 'number' && (
-              <div className="mt-4 border-t border-slate-800 pt-4">
-                <p className="text-xs text-slate-500">Documented compromise count</p>
-                <p className="mt-1 text-2xl font-bold text-white">
-                  {result.compromised_count}
+            <div className="mt-4 grid gap-3 border-t border-white/10 pt-4 sm:grid-cols-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-wider opacity-70">Documented compromises</p>
+                <p className="mt-1 text-xl font-semibold">
+                  {typeof result.compromised_count === 'number' ? result.compromised_count : 'Not determined'}
                 </p>
               </div>
-            )}
+              <div>
+                <p className="text-[11px] uppercase tracking-wider opacity-70">Checklist</p>
+                <p className="mt-1 text-xl font-semibold">
+                  {Object.values(doneSteps).filter(Boolean).length}/{validSteps.length || 0} done
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] uppercase tracking-wider opacity-70">Scenario</p>
+                <p className="mt-1 text-sm font-semibold capitalize">
+                  {scenarios.find(option => option.value === scenario)?.label ?? scenario}
+                </p>
+              </div>
+            </div>
           </div>
+
+          {result.evidence_note && (
+            <p className="flex items-start gap-2 rounded-xl border border-slate-700 bg-slate-900/60 p-3 text-xs leading-5 text-slate-400">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0 text-amber-400" />
+              {result.evidence_note}
+            </p>
+          )}
 
           <div className="grid gap-3 sm:grid-cols-2">
             {recoveryFields.map(field => {
@@ -235,15 +284,66 @@ export const RecoveryView: React.FC<{ t: (key: string) => string }> = ({ t }) =>
                 <ClipboardCheck className="text-emerald-400" size={19} />
                 Recovery checklist
               </h2>
-              <ol className="mt-4 space-y-3">
-                {validSteps.map((step, index) => (
-                  <li key={`${index}-${step}`} className="flex items-start gap-3">
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-cyan-300">
-                      {index + 1}
-                    </span>
-                    <span className="pt-1 text-sm leading-6 text-slate-300">{step}</span>
-                  </li>
-                ))}
+              <div className="mt-2 flex items-center gap-3">
+                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800">
+                  <div
+                    className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                    style={{
+                      width: `${validSteps.length ? (Object.values(doneSteps).filter(Boolean).length / validSteps.length) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard
+                      ?.writeText(validSteps.map((step, index) => `${index + 1}. ${step}`).join('\n'))
+                      .then(() => {
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2000);
+                      })
+                      .catch(() => setCopied(false));
+                  }}
+                  className="btn-secondary inline-flex items-center gap-1.5 text-xs"
+                >
+                  <Copy size={13} />
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+
+              <ol className="mt-4 space-y-2">
+                {validSteps.map((step, index) => {
+                  const done = Boolean(doneSteps[index]);
+                  return (
+                    <li key={`${index}-${step}`}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDoneSteps(current => ({ ...current, [index]: !current[index] }))
+                        }
+                        aria-pressed={done}
+                        className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left transition ${
+                          done
+                            ? 'border-emerald-500/30 bg-emerald-500/5'
+                            : 'border-slate-800 bg-slate-950/40 hover:border-slate-700'
+                        }`}
+                      >
+                        {done ? (
+                          <CheckSquare size={18} className="mt-0.5 shrink-0 text-emerald-400" />
+                        ) : (
+                          <Square size={18} className="mt-0.5 shrink-0 text-slate-500" />
+                        )}
+                        <span
+                          className={`text-sm leading-6 ${
+                            done ? 'text-slate-500 line-through' : 'text-slate-300'
+                          }`}
+                        >
+                          {step}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ol>
             </section>
           )}
