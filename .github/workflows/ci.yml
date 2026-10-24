@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend — build, 157 tests, 28 e2e checks
+    name: Backend — build, unit/integration tests, e2e & Brand Guard smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -42,6 +42,10 @@ jobs:
       - name: End-to-end HTTP harness
         working-directory: backend
         run: npm run e2e
+
+      - name: Brand Guard end-to-end smoke harness
+        working-directory: backend
+        run: npm run smoke:brand-guard
 
   frontend:
     name: Frontend — typecheck and production build

@@ -54,3 +54,12 @@ services:
         sync: false
       - key: COMPLAINT_FROM_EMAIL
         sync: false
+      # ---- Brand Guard impersonation alerts (Resend) ----
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        value: onboarding@resend.dev
+      - key: RESEND_FROM_NAME
+        value: Find_out Brand Guard
+      - key: BRAND_GUARD_SIMILARITY_THRESHOLD
+        value: "0.72"

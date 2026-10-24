@@ -588,6 +588,38 @@ CREATE TABLE IF NOT EXISTS high_risk_alerts (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_high_risk_alerts_dedupe ON high_risk_alerts(dedupe_key);
+
+-- ===========================================================================
+-- Brand Guard: impersonation-registration alerts
+-- ===========================================================================
+-- Where impersonation alerts are delivered for an official brand.
+ALTER TABLE brands ADD COLUMN IF NOT EXISTS contact_email TEXT;
+
+-- One row per "Notify official brand" action. status is only ever 'sent'
+-- after the e-mail provider (Resend) actually accepted the message.
+CREATE TABLE IF NOT EXISTS impersonation_alerts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+  suspect_name TEXT NOT NULL,
+  suspect_domain TEXT,
+  suspect_website TEXT,
+  match_type VARCHAR(32) NOT NULL DEFAULT 'name',
+  similarity NUMERIC(4, 3)
+    CHECK (similarity IS NULL OR (similarity >= 0 AND similarity <= 1)),
+  verdict VARCHAR(32) NOT NULL DEFAULT 'lookalike',
+  recipient_email TEXT NOT NULL,
+  subject TEXT NOT NULL DEFAULT '',
+  status VARCHAR(20) NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'sent', 'failed', 'not_configured')),
+  provider VARCHAR(32) NOT NULL DEFAULT 'resend',
+  provider_message_id TEXT,
+  error_detail TEXT,
+  reporter_note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_impersonation_alerts_brand
+  ON impersonation_alerts(brand_id, created_at DESC);
 `;
 
 export async function initializeSchema(): Promise<void> {

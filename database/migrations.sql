@@ -135,3 +135,27 @@ CREATE INDEX IF NOT EXISTS idx_brand_assets_brand_id ON brand_assets(brand_id);
 CREATE INDEX IF NOT EXISTS idx_discovered_candidates_brand_id ON discovered_candidates(brand_id);
 CREATE INDEX IF NOT EXISTS idx_candidate_evidence_candidate_id ON candidate_evidence(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_risk_assessments_candidate_id ON risk_assessments(candidate_id);
+
+-- 11. Brand Guard — Impersonation-registration alerts (Resend)
+ALTER TABLE brands ADD COLUMN IF NOT EXISTS contact_email TEXT;
+
+CREATE TABLE IF NOT EXISTS impersonation_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+    suspect_name TEXT NOT NULL,
+    suspect_domain TEXT,
+    suspect_website TEXT,
+    match_type VARCHAR(32) NOT NULL DEFAULT 'name',
+    similarity NUMERIC(4, 3) CHECK (similarity IS NULL OR (similarity >= 0 AND similarity <= 1)),
+    verdict VARCHAR(32) NOT NULL DEFAULT 'lookalike',
+    recipient_email TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed', 'not_configured')),
+    provider VARCHAR(32) NOT NULL DEFAULT 'resend',
+    provider_message_id TEXT,
+    error_detail TEXT,
+    reporter_note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_impersonation_alerts_brand ON impersonation_alerts(brand_id, created_at DESC);

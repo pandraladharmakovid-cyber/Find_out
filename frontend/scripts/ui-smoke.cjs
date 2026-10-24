@@ -257,6 +257,95 @@ async function main() {
     check("investigations screen renders", false, "navigation item not found");
   }
 
+  // --- Brand Guard (impersonation pop-up & Resend alert controls) --------
+  const brandsTab = Array.from(window.document.querySelectorAll("button")).find((button) =>
+    (button.textContent || "").trim().startsWith("Brand Profiles"),
+  );
+  if (brandsTab) {
+    brandsTab.click();
+    const guardSection = await waitFor(() =>
+      text().includes("Brand Guard · Impersonation Alerts"),
+    );
+    const paypalButton = await waitFor(() =>
+      Array.from(window.document.querySelectorAll("aside button")).find((button) =>
+        (button.textContent || "").includes("PayPal"),
+      ),
+    );
+    if (paypalButton) paypalButton.click();
+    const guardPanel = await waitFor(
+      () =>
+        guardSection &&
+        text().includes("Brand Guard · Impersonation Alerts") &&
+        text().includes("brand-protection@paypal.com"),
+    );
+    check(
+      "brand profile displays Brand Guard contact e-mail",
+      guardPanel,
+      "brand-protection@paypal.com visible",
+    );
+
+    const openRegisterButton = Array.from(window.document.querySelectorAll("button")).find(
+      (button) =>
+        button.className.includes("btn-primary") &&
+        /register|add|create|brand/i.test(button.textContent || ""),
+    );
+    if (openRegisterButton) {
+      openRegisterButton.click();
+      const dialog = await waitFor(() =>
+        text().includes("Official contact e-mail (impersonation alerts)"),
+      );
+      check(
+        "register brand dialog includes Brand Guard contact field",
+        dialog,
+        "contact e-mail field rendered",
+      );
+
+      const nameInput = window.document.querySelector(
+        'input[placeholder*="Example Technologies"]',
+      );
+      const domainsInput = window.document.querySelector(
+        'input[placeholder*="example.com, example.org"]',
+      );
+      if (nameInput && domainsInput) {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value",
+        );
+        descriptor.set.call(nameInput, "PayPa1");
+        nameInput.dispatchEvent(new window.Event("input", { bubbles: true }));
+        descriptor.set.call(domainsInput, "paypa1-login.top");
+        domainsInput.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+        nameInput
+          .closest("form")
+          .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+
+        const popup = await waitFor(
+          () =>
+            text().includes("Possible brand impersonation detected") &&
+            text().includes("Notify official brand (PayPal)"),
+          15000,
+        );
+        check(
+          "Brand Guard pop-up blocks lookalike registration and offers Notify button",
+          popup,
+          "impersonation alert dialog + Notify PayPal button rendered",
+        );
+
+        const closePopup = window.document.querySelector(
+          'button[aria-label="Close impersonation warning"]',
+        );
+        if (closePopup) closePopup.click();
+        const closeDialog = window.document.querySelector(
+          'button[aria-label="Close dialog"]',
+        );
+        if (closeDialog) closeDialog.click();
+      }
+    }
+  } else {
+    check("brand profile displays Brand Guard contact e-mail", false, "navigation item not found");
+  }
+
   check("no uncaught page errors", pageErrors.length === 0, pageErrors.slice(0, 2).join(" | ") || "clean");
 
   const failed = results.filter((entry) => !entry.ok);

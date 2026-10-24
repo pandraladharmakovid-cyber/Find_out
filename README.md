@@ -17,6 +17,26 @@ Find_out is an AI-assisted cybersecurity platform designed to detect potential s
 - **Investigation Dashboard** – Overall 0–100 risk gauge per investigation, per-factor breakdown, and evidence written as plain-English sentences with a source and status badge for each.
 - **AI Agent Copilot** – Chat box at the top of the dashboard that reads every module and reports which ones are not working.
 - **Detection Records (Rulebook v2)** – Source, Suspected asset, Evidence, Similarity/Risk score and Status on every detection; analyst confirm/dismiss with a who-and-when audit trail; priority queue; one-time high-risk alerts; evidence-based takedown drafts.
+- **Brand Guard (Impersonation Registration Alerts)** – Real-time pre-registration conflict check (`POST /api/brand-guard/check`) with an in-app warning pop-up and one-click e-mail alerts to the official brand's registered contact via Resend (`POST /api/brand-guard/alert`), backed by an auditable `impersonation_alerts` log.
+
+## 🛡️ Brand Guard (Impersonation Registration Alerts via Resend)
+
+When an official brand registers its profile, it can specify an **Official contact e-mail (impersonation alerts)** (or add one to a profile that has none via `POST /api/brand-guard/brands/:brandId/contact`).
+
+Whenever anyone later tries to register a brand whose name, alternate name, or domain is confusingly similar (typosquats like `PayPa1`, homoglyphs, deceptive affixes like `-login`, or look-alike domains like `paypa1-login.top`), the platform intercepts the submission before saving and opens the **Possible brand impersonation detected** pop-up (`frontend/src/brand-guard-popup.tsx`):
+
+- **`GET /api/brand-guard/status`** – Reports whether Resend e-mail delivery is configured.
+- **`POST /api/brand-guard/check`** – Compares `{ name, domain }` against all active brands and returns similarity percentages and verdicts (`EXACT MATCH` / `LIKELY IMPERSONATION` / `LOOKALIKE`).
+- **`POST /api/brand-guard/alert`** – Triggered by **Notify official brand (`<name>`)**: sends a structured HTML + plain-text alert via Resend (`RESEND_API_KEY`) and stores an audit row in `impersonation_alerts`. Only marks an alert `sent` after Resend returns HTTP 2xx with a message ID; returns HTTP 503 (`not_configured`) if `RESEND_API_KEY` is unset.
+- **`GET /api/brand-guard/alerts`** – Lists impersonation alert history (globally or filtered by `?brandId=...`).
+
+```ini
+# backend/.env (or Render Environment)
+RESEND_API_KEY=re_...
+RESEND_FROM_EMAIL=onboarding@resend.dev
+RESEND_FROM_NAME=Find_out Brand Guard
+BRAND_GUARD_SIMILARITY_THRESHOLD=0.72
+```
 
 ## 🤖 AI Agent (dashboard copilot)
 
