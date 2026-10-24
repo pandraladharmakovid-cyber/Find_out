@@ -1,6 +1,7 @@
 import { app } from "./app";
 import { config } from "./config";
 import { initializeSchema } from "./schema";
+import { externalBrandWatchService } from "./external-watch.service";
 import { logger } from "./utils/logger";
 import { pool } from "./db";
 
@@ -12,12 +13,15 @@ async function bootstrap() {
     await initializeSchema();
     logger.info("[server] Database schema initialization complete.");
 
+    externalBrandWatchService.startScheduler();
+
     const server = app.listen(PORT, () => {
       logger.info(`[server] Threat Intelligence Engine running on port ${PORT}`);
     });
 
     const shutdown = async (signal: string) => {
       logger.info(`[server] ${signal} received, shutting down...`);
+      externalBrandWatchService.stopScheduler();
       server.close(async () => {
         await pool.end();
         process.exit(0);

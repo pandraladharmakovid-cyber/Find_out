@@ -5,6 +5,7 @@ import { Header } from './components';
 import { DashboardView } from './dashboard';
 import { BrandsView } from './brands';
 import { MonitoringView } from './monitoring';
+import { ExternalWatchView } from './external-watch';
 import { FindingsView } from './findings';
 import { DetectionsView } from './detections';
 import { InvestigationsView } from './investigations';
@@ -19,6 +20,7 @@ type TabId =
   | 'copilot'
   | 'brands'
   | 'monitoring'
+  | 'external-watch'
   | 'detections'
   | 'findings'
   | 'lookalike'
@@ -31,6 +33,7 @@ const validTabs: TabId[] = [
   'copilot',
   'brands',
   'monitoring',
+  'external-watch',
   'detections',
   'findings',
   'lookalike',
@@ -61,6 +64,18 @@ export default function App() {
           <MonitoringView
             t={t}
             onDeepInspect={(target) => {
+              setInvestigationTarget(target);
+              setActiveTab('investigations');
+            }}
+          />
+        );
+
+      case 'external-watch':
+        return (
+          <ExternalWatchView
+            t={t}
+            onNavigate={navigate}
+            onInspectUrl={(target) => {
               setInvestigationTarget(target);
               setActiveTab('investigations');
             }}

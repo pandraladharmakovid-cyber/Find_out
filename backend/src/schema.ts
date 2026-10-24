@@ -620,6 +620,91 @@ CREATE TABLE IF NOT EXISTS impersonation_alerts (
 
 CREATE INDEX IF NOT EXISTS idx_impersonation_alerts_brand
   ON impersonation_alerts(brand_id, created_at DESC);
+
+-- ===========================================================================
+-- External Brand Watch: automatic external internet impersonation detection
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS external_watch_schedules (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  brand_id UUID NOT NULL UNIQUE REFERENCES brands(id) ON DELETE CASCADE,
+  is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  interval_minutes INTEGER NOT NULL DEFAULT 60,
+  alert_risk_threshold NUMERIC(5, 2) NOT NULL DEFAULT 65.00,
+  last_run_at TIMESTAMPTZ,
+  next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_status VARCHAR(32) NOT NULL DEFAULT 'IDLE',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_watch_schedules_due
+  ON external_watch_schedules(is_enabled, next_run_at ASC);
+
+CREATE TABLE IF NOT EXISTS external_watch_runs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+  trigger_type VARCHAR(32) NOT NULL DEFAULT 'scheduled',
+  status VARCHAR(32) NOT NULL DEFAULT 'IN_PROGRESS',
+  monitoring_run_id UUID REFERENCES monitoring_runs(id) ON DELETE SET NULL,
+  sources_checked JSONB NOT NULL DEFAULT '[]'::jsonb,
+  candidates_discovered INTEGER NOT NULL DEFAULT 0,
+  new_candidates_count INTEGER NOT NULL DEFAULT 0,
+  changed_candidates_count INTEGER NOT NULL DEFAULT 0,
+  high_risk_count INTEGER NOT NULL DEFAULT 0,
+  alerts_created INTEGER NOT NULL DEFAULT 0,
+  emails_sent INTEGER NOT NULL DEFAULT 0,
+  deduplicated_alerts_skipped INTEGER NOT NULL DEFAULT 0,
+  error_summary TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_watch_runs_brand
+  ON external_watch_runs(brand_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS external_watch_seen_assets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+  platform VARCHAR(64) NOT NULL,
+  canonical_id VARCHAR(255) NOT NULL,
+  target_url TEXT NOT NULL,
+  display_name VARCHAR(255),
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_candidate_id UUID REFERENCES discovered_candidates(id) ON DELETE SET NULL,
+  last_investigation_id UUID REFERENCES investigations(id) ON DELETE SET NULL,
+  last_risk_score NUMERIC(5, 2) NOT NULL DEFAULT 0,
+  last_risk_level VARCHAR(20) NOT NULL DEFAULT 'LOW',
+  previous_risk_score NUMERIC(5, 2),
+  change_state VARCHAR(24) NOT NULL DEFAULT 'new',
+  times_seen INTEGER NOT NULL DEFAULT 1,
+  corroborating_signals JSONB NOT NULL DEFAULT '[]'::jsonb,
+  evidence_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+  UNIQUE (brand_id, platform, canonical_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_watch_seen_brand
+  ON external_watch_seen_assets(brand_id, last_risk_score DESC, last_seen_at DESC);
+
+CREATE TABLE IF NOT EXISTS external_watch_notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+  dedupe_key VARCHAR(320) NOT NULL UNIQUE,
+  platform VARCHAR(64) NOT NULL,
+  canonical_id VARCHAR(255) NOT NULL,
+  target_url TEXT NOT NULL,
+  risk_score NUMERIC(5, 2) NOT NULL DEFAULT 0,
+  risk_level VARCHAR(20) NOT NULL DEFAULT 'HIGH',
+  alert_id UUID REFERENCES alerts(id) ON DELETE SET NULL,
+  recipient_email TEXT,
+  email_status VARCHAR(32) NOT NULL DEFAULT 'not_configured',
+  resend_message_id TEXT,
+  email_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_watch_notifications_brand
+  ON external_watch_notifications(brand_id, created_at DESC);
 `;
 
 export async function initializeSchema(): Promise<void> {

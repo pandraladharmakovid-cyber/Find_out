@@ -255,6 +255,44 @@ async function seed(run) {
   // Materialise the Rulebook-v2 detection records for the seeded candidates.
   const { detectionRecordService } = require(path.join(DIST, "detection-records.service.js"));
   const synced = await detectionRecordService.sync();
+
+  // Enroll seeded brands into External Brand Watch and populate initial seen-asset tracking
+  // from the seeded candidates so the External Brand Watch dashboard works out of the box.
+  const { externalBrandWatchService } = require(path.join(DIST, "external-watch.service.js"));
+  await externalBrandWatchService.ensureAllActiveBrandsEnrolled();
+
+  const seededCandidates = await run(
+    `SELECT dc.id, dc.brand_id, dc.platform, dc.candidate_identifier, dc.candidate_url, dc.display_name,
+            COALESCE(ra.risk_score, 0)::numeric AS risk_score, COALESCE(ra.risk_level, 'LOW') AS risk_level
+     FROM discovered_candidates dc
+     LEFT JOIN risk_assessments ra ON ra.candidate_id = dc.id
+     WHERE dc.is_excluded_official = FALSE`,
+  );
+
+  for (const row of seededCandidates.rows) {
+    const score = Number(row.risk_score ?? 0);
+    const signals = score >= 65 ? ["PUBLISHER_MISMATCH", "APP_NAME_SIMILARITY"] : [];
+    await run(
+      `INSERT INTO external_watch_seen_assets
+         (brand_id, platform, canonical_id, target_url, display_name, last_candidate_id,
+          last_risk_score, last_risk_level, change_state, corroborating_signals, evidence_summary)
+       VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8, 'new', $9::jsonb, $10::jsonb)
+       ON CONFLICT (brand_id, platform, canonical_id) DO NOTHING`,
+      [
+        row.brand_id,
+        row.platform,
+        String(row.candidate_identifier).toLowerCase(),
+        row.candidate_url,
+        row.display_name,
+        row.id,
+        score,
+        row.risk_level,
+        JSON.stringify(signals),
+        JSON.stringify({ seeded: true, corroborated: signals.length > 0 }),
+      ],
+    );
+  }
+
   console.log(`[demo] seeded ${brands.length} brands and ${synced.created} detection records`);
 }
 

@@ -514,6 +514,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <div className="mt-5 space-y-2">
               {[
                 {
+                  label: 'External Brand Watch',
+                  detail: 'Continuous external domain, social & app impersonation watch',
+                  icon: Radar,
+                  tab: 'external-watch',
+                },
+                {
                   label: 'Investigate a URL or profile',
                   detail: 'Inspect a suspicious target',
                   icon: Target,

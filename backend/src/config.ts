@@ -121,6 +121,58 @@ const envSchema = z.object({
     .default(0.72),
 
   // ---------------------------------------------------------------------
+  // External Brand Watch — continuous external internet impersonation watch
+  // ---------------------------------------------------------------------
+  EXTERNAL_WATCH_SCHEDULER_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => value?.trim().toLowerCase() !== "false"),
+  EXTERNAL_WATCH_AUTO_SCAN_ON_REGISTER: z
+    .string()
+    .optional()
+    .transform((value) => value?.trim().toLowerCase() !== "false"),
+  EXTERNAL_WATCH_DEFAULT_INTERVAL_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(5)
+    .max(1440)
+    .default(60),
+  EXTERNAL_WATCH_TICK_MS: z.coerce
+    .number()
+    .int()
+    .min(5000)
+    .max(3_600_000)
+    .default(60_000),
+  EXTERNAL_WATCH_ALERT_THRESHOLD: z.coerce
+    .number()
+    .int()
+    .min(40)
+    .max(100)
+    .default(70),
+  EXTERNAL_WATCH_CT_URL: z
+    .string()
+    .trim()
+    .default("https://crt.sh"),
+  EXTERNAL_WATCH_CT_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(2000)
+    .max(60_000)
+    .default(12_000),
+  EXTERNAL_WATCH_DNS_PROBE_LIMIT: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(60)
+    .default(18),
+  EXTERNAL_WATCH_MAX_INVESTIGATIONS_PER_RUN: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(25)
+    .default(6),
+
+  // ---------------------------------------------------------------------
   // Live cyber threat feed
   // ---------------------------------------------------------------------
   THREAT_FEED_ENABLED: z
