@@ -1,3 +1,4 @@
+
 import { config } from "../config";
 import { logger } from "../utils/logger";
 import { AuditLogsRepository } from "../repositories";
@@ -10,127 +11,139 @@ export interface SafeBrowsingMatch {
 
 export interface SafeBrowsingCheckResult {
   source: "safebrowsing";
+  status: "available" | "unavailable";
   isThreat: boolean;
   threatTypes: string[];
   rawMatches: SafeBrowsingMatch[];
   confidence: number;
+  error?: string;
 }
 
 export class SafeBrowsingClient {
-  private readonly baseUrl = "https://safebrowsing.googleapis.com/v4/threatMatches:find";
+  private readonly baseUrl =
+    "https://safebrowsing.googleapis.com/v4/threatMatches:find";
 
-  /**
-   * Checks a URL against Google Safe Browsing v4 threat lists (Malware, Social Engineering, Unwanted Software).
-   */
   async checkUrl(
     targetUrl: string,
-    investigationId?: string
+    investigationId?: string,
   ): Promise<SafeBrowsingCheckResult> {
     const startTime = Date.now();
 
-    // If API key is not configured, record graceful skip and return unflagged baseline
     if (!config.GOOGLE_SAFE_BROWSING_API_KEY) {
-      logger.info("[safebrowsing] Google Safe Browsing API key missing. Skipping lookup.");
+      logger.warn(
+        "[safebrowsing] API key missing; lookup was not performed.",
+      );
+
       return {
         source: "safebrowsing",
+        status: "unavailable",
         isThreat: false,
         threatTypes: [],
         rawMatches: [],
         confidence: 0,
+        error: "Google Safe Browsing API key is not configured.",
       };
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      config.REQUEST_TIMEOUT_MS,
+    );
+
     try {
-      logger.info("[safebrowsing] Querying Safe Browsing threat lists", { targetUrl });
-
-      const requestBody = {
-        client: {
-          clientId: "find-out-security-engine",
-          clientVersion: "1.0.0",
-        },
-        threatInfo: {
-          threatTypes: [
-            "MALWARE",
-            "SOCIAL_ENGINEERING",
-            "UNWANTED_SOFTWARE",
-            "POTENTIALLY_HARMFUL_APPLICATION",
-          ],
-          platformTypes: ["ANY_PLATFORM"],
-          threatEntryTypes: ["URL"],
-          threatEntries: [{ url: targetUrl }],
-        },
-      };
-
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(),
-        config.REQUEST_TIMEOUT_MS
-      );
-
       const response = await fetch(
-        `${this.baseUrl}?key=${config.GOOGLE_SAFE_BROWSING_API_KEY}`,
+        `${this.baseUrl}?key=${encodeURIComponent(config.GOOGLE_SAFE_BROWSING_API_KEY)}`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(requestBody),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client: {
+              clientId: "find-out-security-engine",
+              clientVersion: "1.0.0",
+            },
+            threatInfo: {
+              threatTypes: [
+                "MALWARE",
+                "SOCIAL_ENGINEERING",
+                "UNWANTED_SOFTWARE",
+                "POTENTIALLY_HARMFUL_APPLICATION",
+              ],
+              platformTypes: ["ANY_PLATFORM"],
+              threatEntryTypes: ["URL"],
+              threatEntries: [{ url: targetUrl }],
+            },
+          }),
           signal: controller.signal,
-        }
+        },
       );
 
-      clearTimeout(timeout);
-      const latencyMs = Date.now() - startTime;
-
       if (!response.ok) {
-        throw new Error(`Google Safe Browsing returned HTTP status ${response.status}`);
+        throw new Error(
+          `Google Safe Browsing returned HTTP status ${response.status}`,
+        );
       }
 
-      const data = (await response.json()) as { matches?: SafeBrowsingMatch[] };
+      const data = (await response.json()) as {
+        matches?: SafeBrowsingMatch[];
+      };
+
       const matches = data.matches ?? [];
-      const isThreat = matches.length > 0;
-      const threatTypes = [...new Set(matches.map((m) => m.threatType))];
+      const threatTypes = [
+        ...new Set(matches.map((match) => match.threatType)),
+      ];
 
       await AuditLogsRepository.recordLog({
         investigation_id: investigationId,
         source: "safebrowsing",
         status: "success",
-        latency_ms: latencyMs,
+        latency_ms: Date.now() - startTime,
       });
 
       return {
         source: "safebrowsing",
-        isThreat,
+        status: "available",
+        isThreat: matches.length > 0,
         threatTypes,
         rawMatches: matches,
-        confidence: isThreat ? 95.0 : 90.0,
+        confidence: matches.length > 0 ? 95 : 90,
       };
     } catch (error) {
-      const latencyMs = Date.now() - startTime;
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
 
       logger.warn("[safebrowsing] Lookup failed or timed out", {
-        targetUrl,
         error: errorMessage,
       });
 
-      await AuditLogsRepository.recordLog({
-        investigation_id: investigationId,
-        source: "safebrowsing",
-        status: "failed",
-        latency_ms: latencyMs,
-        error_message: errorMessage,
-      });
+      try {
+        await AuditLogsRepository.recordLog({
+          investigation_id: investigationId,
+          source: "safebrowsing",
+          status: "failed",
+          latency_ms: Date.now() - startTime,
+          error_message: errorMessage,
+        });
+      } catch (auditError) {
+        logger.error("[safebrowsing] Failed to record audit log", {
+          error:
+            auditError instanceof Error
+              ? auditError.message
+              : "Unknown audit error",
+        });
+      }
 
-      // Graceful degraded mode
       return {
         source: "safebrowsing",
+        status: "unavailable",
         isThreat: false,
         threatTypes: [],
         rawMatches: [],
         confidence: 0,
+        error: errorMessage,
       };
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }

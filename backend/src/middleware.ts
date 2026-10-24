@@ -1,5 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
+import { config } from "./config";
+import { urlSafetyEngine } from "./url-safety";
 
 /**
  * Standard Operational API Error
@@ -56,9 +58,11 @@ export function requestIdMiddleware(req: Request, res: Response, next: NextFunct
 /**
  * Basic security headers middleware.
  */
-export function securityHeadersMiddleware(_req: Request, res: Response, next: NextFunction): void {
+export function securityHeadersMiddleware(req: Request, res: Response, next: NextFunction): void {
   res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("X-Frame-Options", "DENY");
+  if (!config.SERVE_FRONTEND_DIR || req.path.startsWith("/api") || req.path === "/health") {
+    res.setHeader("X-Frame-Options", "DENY");
+  }
   res.setHeader("X-XSS-Protection", "1; mode=block");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   next();
@@ -67,9 +71,9 @@ export function securityHeadersMiddleware(_req: Request, res: Response, next: Ne
 /**
  * Rate Limiter to protect investigation and scan endpoints.
  */
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-
 export function rateLimiter(limit: number = 120, windowMs: number = 60000) {
+  const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
   return (req: Request, res: Response, next: NextFunction): void => {
     const ip = req.ip || req.socket.remoteAddress || "127.0.0.1";
     const now = Date.now();
@@ -101,45 +105,7 @@ export function rateLimiter(limit: number = 120, windowMs: number = 60000) {
  * Blocks private, localhost, and loopback IP spaces from server-side fetches.
  */
 export function validateSafeUrl(rawUrl: string): boolean {
-  try {
-    const parsed = new URL(rawUrl);
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      return false;
-    }
-
-    const hostname = parsed.hostname.toLowerCase();
-
-    // Loopback / link-local / local domains
-    if (
-      hostname === "localhost" ||
-      hostname.endsWith(".local") ||
-      hostname.endsWith(".internal") ||
-      hostname.endsWith(".localhost") ||
-      hostname === "127.0.0.1" ||
-      hostname === "0.0.0.0" ||
-      hostname === "::1"
-    ) {
-      return false;
-    }
-
-    // Common private IPv4 ranges (10.x, 172.16-31.x, 192.168.x, 169.254.x)
-    const ipv4Regex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-    const match = hostname.match(ipv4Regex);
-    if (match && match[1] !== undefined && match[2] !== undefined) {
-      const o1 = Number(match[1]);
-      const o2 = Number(match[2]);
-
-      if (o1 === 10) return false;
-      if (o1 === 127) return false;
-      if (o1 === 169 && o2 === 254) return false;
-      if (o1 === 192 && o2 === 168) return false;
-      if (o1 === 172 && o2 >= 16 && o2 <= 31) return false;
-    }
-
-    return true;
-  } catch {
-    return false;
-  }
+  return urlSafetyEngine.validateTargetUrl(rawUrl).isAllowed;
 }
 
 /**

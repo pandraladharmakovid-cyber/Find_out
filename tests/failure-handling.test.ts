@@ -23,6 +23,8 @@ import * as appStoresModule from '../backend/src/app-stores';
 import * as socialModule from '../backend/src/social';
 import { BrandAssetsRepository } from '../backend/src/repositories';
 import { logoSimilarityService } from '../backend/src/logo-similarity.service';
+import { blueskyClient } from '../backend/src/integrations/bluesky.client';
+import { youtubeClient } from '../backend/src/integrations/youtube.client';
 
 describe('Graceful Source Failure & Error Handling (Criterion D)', () => {
   beforeEach(() => {
@@ -35,49 +37,67 @@ describe('Graceful Source Failure & Error Handling (Criterion D)', () => {
   });
 
   describe('Social Media Source Restrictions', () => {
-    it('handles rate-limited or restricted platforms without crashing the pipeline', async () => {
-      const socialEngine: any = new (socialModule as any).SocialMonitoringService
-        ? new (socialModule as any).SocialMonitoringService()
-        : (socialModule as any);
+    it('handles provider rate limits without crashing or inventing candidates', async () => {
+      vi.spyOn(blueskyClient, 'searchDiscussions').mockResolvedValue({
+        source: 'bluesky',
+        query: 'NexusPay',
+        totalFound: 0,
+        posts: [],
+        hasScamSignals: false,
+        confidence: 0,
+        rawPayload: { sourceStatus: 'unavailable', error: 'HTTP 429 Too Many Requests' },
+      });
+      vi.spyOn(youtubeClient, 'searchVideos').mockResolvedValue({
+        source: 'youtube',
+        query: 'NexusPay',
+        totalFound: 0,
+        videos: [],
+        hasScamSignals: false,
+        confidence: 0,
+        rawPayload: { error: 'HTTP 429 Too Many Requests' },
+      });
 
-      const scanMethod =
-        socialEngine.scanPlatform ||
-        socialEngine.searchProfiles ||
-        socialEngine.monitor;
+      const result = await new socialModule.SocialMonitoringService().scanBrandMentions({
+        brandName: 'NexusPay',
+      });
 
-      // Mock a network failure or 429 Rate Limit error
-      const restrictedRunner = async () => {
-        try {
-          if (typeof scanMethod === 'function') {
-            await scanMethod.call(socialEngine, {
-              platform: 'reddit',
-              query: 'rate_limit_test',
-              simulateFailure: true,
-            });
-          }
-          return { status: 'restricted', error: 'HTTP 429 Too Many Requests' };
-        } catch (err: any) {
-          // Graceful fallback: return error payload rather than unhandled rejection
-          return { status: 'error_recorded', message: err.message };
-        }
-      };
-
-      const result = await restrictedRunner();
-      expect(['restricted', 'error_recorded']).toContain(result.status);
+      expect(result.totalFindings).toBe(0);
+      expect(result.signals).toEqual([]);
+      expect(result.sources).toEqual([
+        expect.objectContaining({ source: 'bluesky', status: 'unavailable', candidatesFound: 0 }),
+        expect.objectContaining({ source: 'youtube', status: 'unavailable', candidatesFound: 0 }),
+      ]);
     });
 
-    it('records source status as partial/unavailable instead of fabricating findings', async () => {
-      const mockResult = {
-        platform: 'youtube',
-        success: false,
-        candidatesFound: 0,
-        errorMessage: 'Quota exceeded or source unavailable',
-        recordedGracefully: true,
-      };
+    it('keeps an unavailable source distinct from an available source with zero matches', async () => {
+      vi.spyOn(blueskyClient, 'searchDiscussions').mockResolvedValue({
+        source: 'bluesky',
+        query: 'NexusPay',
+        totalFound: 0,
+        posts: [],
+        hasScamSignals: false,
+        confidence: 0,
+        rawPayload: { sourceStatus: 'unavailable', error: 'Provider unavailable' },
+      });
+      vi.spyOn(youtubeClient, 'searchVideos').mockResolvedValue({
+        source: 'youtube',
+        query: 'NexusPay',
+        totalFound: 0,
+        videos: [],
+        hasScamSignals: false,
+        confidence: 50,
+        rawPayload: { totalCount: 0, scamSignals: false },
+      });
 
-      expect(mockResult.success).toBe(false);
-      expect(mockResult.candidatesFound).toBe(0);
-      expect(mockResult.recordedGracefully).toBe(true);
+      const result = await new socialModule.SocialMonitoringService().scanBrandMentions({
+        brandName: 'NexusPay',
+      });
+
+      expect(result.totalFindings).toBe(0);
+      expect(result.sources).toEqual([
+        expect.objectContaining({ source: 'bluesky', status: 'unavailable' }),
+        expect.objectContaining({ source: 'youtube', status: 'available', candidatesFound: 0 }),
+      ]);
     });
   });
 
@@ -90,13 +110,22 @@ describe('Graceful Source Failure & Error Handling (Criterion D)', () => {
 
       expect(outcome.totalFound).toBe(0);
       expect(outcome.unauthorizedAppsCount).toBe(0);
-      expect(outcome.sources).toEqual([
-        expect.objectContaining({
-          source: 'apple_app_store',
-          status: 'unavailable',
-          candidatesFound: 0,
-        }),
-      ]);
+      // Both stores are queried; a failure in either is reported without
+      // hiding the other source.
+      expect(outcome.sources).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: 'apple_app_store',
+            status: 'unavailable',
+            candidatesFound: 0,
+          }),
+          expect.objectContaining({
+            source: 'google_play',
+            status: 'unavailable',
+            candidatesFound: 0,
+          }),
+        ]),
+      );
     });
 
     it('uses live catalog data and excludes an exact registered official app', async () => {
@@ -192,13 +221,45 @@ describe('Graceful Source Failure & Error Handling (Criterion D)', () => {
       expect(outcome.logoComparisons.compared).toBe(1);
       expect(outcome.findings[0]?.riskScore).toBeGreaterThanOrEqual(60);
     });
+
+    it('ignores unrelated App Store results instead of calling them unauthorized', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+        results: [
+          {
+            trackId: 300,
+            bundleId: 'com.unrelated.notes',
+            trackName: 'Daily Notes',
+            sellerName: 'Other Publisher',
+            trackViewUrl: 'https://apps.apple.com/app/daily-notes/id300',
+            description: 'A simple notes application.',
+          },
+          {
+            trackId: 301,
+            bundleId: 'com.nexuspay.wallet',
+            trackName: 'NexusPay Wallet',
+            sellerName: 'Unknown Publisher',
+            trackViewUrl: 'https://apps.apple.com/app/nexuspay-wallet/id301',
+            description: 'A wallet application.',
+          },
+        ],
+      })));
+
+      const outcome = await new appStoresModule.AppStoresMonitoringService().scanAppStores({
+        brandName: 'NexusPay',
+      });
+
+      expect(outcome.totalFound).toBe(1);
+      expect(outcome.unauthorizedAppsCount).toBe(1);
+      expect(outcome.findings[0]?.appId).toBe('com.nexuspay.wallet');
+      expect(outcome.findings[0]?.isOfficialDeveloper).toBe(false);
+    });
   });
 
   describe('End-to-End Orchestrator Resilience', () => {
     it('allows successful sources to report findings even if one source fails', async () => {
-      // If Reddit succeeds but App Store fails, monitoring run must still return Reddit results
+      // If Bluesky succeeds but App Store fails, monitoring run must still return Bluesky results
       const multiSourceResults = [
-        { source: 'reddit', success: true, count: 3 },
+        { source: 'bluesky', success: true, count: 3 },
         { source: 'apple_app_store', success: false, error: 'Connection refused' },
       ];
 

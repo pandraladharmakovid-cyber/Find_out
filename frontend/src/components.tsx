@@ -1,29 +1,31 @@
-
 import React, { useState } from 'react';
 import {
   Activity,
   Bell,
+  Bot,
   Building2,
   ChevronDown,
   FileSearch,
   Globe,
   LayoutDashboard,
+  ListChecks,
   Menu,
   Radar,
+  ScanSearch,
   Shield,
   ShieldAlert,
   ShieldCheck,
   Siren,
   X,
 } from 'lucide-react';
-import type { Language } from './i18n';
+import type { Language, Translator } from './i18n';
 
 type HeaderProps = {
   currentLang: Language;
   onLanguageChange: (lang: Language) => void;
   activeTab: string;
   setActiveTab: (tab: string) => void;
-  t: any;
+  t: Translator;
 };
 
 type NavigationItem = {
@@ -38,41 +40,56 @@ const languages: { id: Language; label: string; short: string }[] = [
   { id: 'te', label: 'తెలుగు', short: 'TE' },
 ];
 
-function getNavigation(t: any): NavigationItem[] {
+function getNavigation(t: Translator): NavigationItem[] {
   return [
     {
       id: 'dashboard',
-      label: t?.nav?.dashboard ?? 'Dashboard',
+      label: t('nav.dashboard'),
       icon: LayoutDashboard,
     },
     {
+      id: 'copilot',
+      label: t('nav.copilot'),
+      icon: Bot,
+    },
+    {
       id: 'brands',
-      label: t?.nav?.brands ?? 'Brand profiles',
+      label: t('nav.brands'),
       icon: Building2,
     },
     {
       id: 'monitoring',
-      label: t?.nav?.monitoring ?? 'Monitoring',
+      label: t('nav.monitoring'),
       icon: Radar,
     },
     {
+      id: 'detections',
+      label: t('nav.detections'),
+      icon: ListChecks,
+    },
+    {
       id: 'findings',
-      label: t?.nav?.findings ?? 'Findings',
+      label: t('nav.findings'),
       icon: ShieldAlert,
     },
     {
+      id: 'lookalike',
+      label: t('nav.lookalike'),
+      icon: ScanSearch,
+    },
+    {
       id: 'investigations',
-      label: t?.nav?.investigations ?? 'Investigations',
+      label: t('nav.investigations'),
       icon: FileSearch,
     },
     {
       id: 'recovery',
-      label: t?.nav?.recovery ?? 'Recovery',
+      label: t('nav.recovery'),
       icon: ShieldCheck,
     },
     {
       id: 'reports',
-      label: t?.nav?.reports ?? 'Reports & alerts',
+      label: t('nav.reports'),
       icon: Siren,
     },
   ];
@@ -120,7 +137,7 @@ export const Header: React.FC<HeaderProps> = ({
               Find<span className="text-blue-400">_</span>out
             </span>
             <span className="hidden text-[10px] font-semibold uppercase tracking-[0.17em] text-slate-500 sm:block">
-              Digital Risk Protection
+              {t('app.tagline')}
             </span>
           </span>
         </button>

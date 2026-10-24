@@ -9,6 +9,20 @@ function applyDatabaseSslMode(connectionString: string, ssl: boolean): string {
   return url.toString();
 }
 
+function isPooledConnection(connectionString: string): boolean {
+  if (!connectionString) return false;
+  try {
+    const parsed = new URL(connectionString);
+    return (
+      parsed.hostname.includes("-pooler.") ||
+      parsed.hostname.includes(".pooler.") ||
+      parsed.searchParams.get("pgbouncer") === "true"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export const pool = new Pool({
   connectionString: applyDatabaseSslMode(config.DATABASE_URL, config.DATABASE_SSL),
   ssl: config.DATABASE_SSL ? { rejectUnauthorized: true } : false,
@@ -16,6 +30,13 @@ export const pool = new Pool({
   idleTimeoutMillis: 30_000,
   max: 10,
   application_name: "find-out-backend",
+  // Bounds runaway queries so the findings page cannot hang a request.
+  // PgBouncer / pooled hosts reject startup statement_timeout parameters,
+  // so only send statement_timeout on direct PostgreSQL connections.
+  ...(isPooledConnection(config.DATABASE_URL)
+    ? {}
+    : { statement_timeout: config.DB_STATEMENT_TIMEOUT_MS }),
+  query_timeout: config.DB_STATEMENT_TIMEOUT_MS + 2000,
 });
 
 pool.on("error", (error: Error) => {

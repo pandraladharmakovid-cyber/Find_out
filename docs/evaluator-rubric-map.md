@@ -3,7 +3,7 @@
 | Rubric item | Implementation surface | Verifiable behavior |
 | --- | --- | --- |
 | Brand profile (15%) | `frontend/src/brands.tsx`, `/api/brands`, `backend/src/brands.ts` | Persists names, domain, alternate names, keywords, publisher and official assets in PostgreSQL. |
-| Social monitoring (30%) | `backend/src/social.ts`, Reddit and YouTube adapters, `backend/src/monitoring.ts` | Searches public discussions/videos; stores matching context, account/channel URL, name/content signals and exact verified exclusions. |
+| Social monitoring (30%) | `backend/src/social.ts`, Bluesky and YouTube adapters, `backend/src/monitoring.ts` | Searches public discussions/videos; stores matching context, account/channel URL, name/content signals and exact verified exclusions. |
 | App Store monitoring (30%) | `backend/src/app-stores.ts` | Uses Apple public Search API results; compares names, descriptions and supplied publisher identity; excludes exact official store IDs/URLs. |
 | Logo and look-alike bonus | `backend/src/logo-similarity.service.ts`, `backend/src/lookalike.service.ts` | Computes image similarity from decoded pixels and normalized name similarity; an image failure remains unassessed. |
 | User experience (15%) | React dashboard and source-status cards | Shows loading/error/empty states, evidence and excluded assets. Unconfigured/rate-limited sources are not represented as successful clean checks. |

@@ -32,8 +32,28 @@ monitoringRouter.post("/run", startScan);
 monitoringRouter.get("/candidates", async (req: Request, res: Response): Promise<void> => {
   try {
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
-    const candidates = await monitoringService.getCandidates(brandId);
-    res.json({ success: true, count: candidates.length, data: candidates });
+    const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
+    const limit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 200;
+    const offset = typeof req.query.offset === "string" ? Number.parseInt(req.query.offset, 10) : 0;
+
+    const [candidates, summary] = await Promise.all([
+      monitoringService.getCandidates(brandId, runId, {
+        limit: Number.isFinite(limit) ? limit : 200,
+        offset: Number.isFinite(offset) ? offset : 0,
+      }),
+      monitoringService.getCandidatesSummary(brandId),
+    ]);
+
+    res.json({
+      success: true,
+      count: candidates.length,
+      data: candidates,
+      summary,
+      pagination: {
+        limit: Number.isFinite(limit) ? limit : 200,
+        offset: Number.isFinite(offset) ? offset : 0,
+      },
+    });
   } catch (error) {
     logger.error("[monitoring.routes] Failed to load monitoring candidates", {
       error: error instanceof Error ? error.message : "Unknown error",
@@ -45,6 +65,19 @@ monitoringRouter.get("/candidates", async (req: Request, res: Response): Promise
   }
 });
 
+monitoringRouter.get("/summary", async (req: Request, res: Response): Promise<void> => {
+  try {
+    const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
+    const summary = await monitoringService.getCandidatesSummary(brandId);
+    res.json({ success: true, data: summary });
+  } catch (error) {
+    logger.error("[monitoring.routes] Failed to summarise candidates", {
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+    res.status(500).json({ success: false, error: "Failed to summarise candidates." });
+  }
+});
+
 monitoringRouter.get("/results/:brandId", async (req: Request, res: Response): Promise<void> => {
   const brandId = Array.isArray(req.params.brandId) ? req.params.brandId[0] : req.params.brandId;
   if (!brandId) {
@@ -52,9 +85,19 @@ monitoringRouter.get("/results/:brandId", async (req: Request, res: Response): P
     return;
   }
   try {
-    const [run, candidates] = await Promise.all([
-      monitoringService.getLatestRun(brandId),
-      monitoringService.getCandidates(brandId),
+    const limit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 200;
+    const offset = typeof req.query.offset === "string" ? Number.parseInt(req.query.offset, 10) : 0;
+
+    const run = await monitoringService.getLatestRun(brandId);
+    const runId = typeof run?.id === "string" ? run.id : null;
+    const [candidates, counters] = await Promise.all([
+      runId
+        ? monitoringService.getCandidates(brandId, runId, {
+            limit: Number.isFinite(limit) ? limit : 200,
+            offset: Number.isFinite(offset) ? offset : 0,
+          })
+        : Promise.resolve([]),
+      monitoringService.getCandidatesSummary(brandId),
     ]);
     res.json({
       success: true,
@@ -63,9 +106,11 @@ monitoringRouter.get("/results/:brandId", async (req: Request, res: Response): P
         run,
         candidates,
         summary: {
-          total: candidates.length,
+          total: counters.total,
           suspicious: candidates.filter((candidate) => !candidate.is_official_excluded).length,
-          excluded: candidates.filter((candidate) => candidate.is_official_excluded).length,
+          excluded: counters.excluded,
+          highRisk: counters.highRisk,
+          returned: candidates.length,
         },
       },
     });

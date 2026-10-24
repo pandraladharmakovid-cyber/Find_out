@@ -5,6 +5,8 @@ import { complaintService, type ComplaintStatus, type ComplaintType } from "../c
 import { reportsService } from "../reports";
 import { logger } from "../utils/logger";
 import { ComplaintsRepository } from "../repositories";
+import { complaintDispatchService } from "../complaints-dispatch.service";
+import { threatFeedService } from "../integrations/threat-feed.client";
 import { query } from "../db";
 
 export const commonRouter = Router();
@@ -294,6 +296,18 @@ commonRouter.patch("/complaints/:id/status", async (req: Request, res: Response)
       return;
     }
 
+    // "sent" must never be recorded by accident: either the platform delivered
+    // the notice (POST /complaints/:id/send) or an operator confirms that it was
+    // sent from an external mailbox.
+    if (status === "sent" && req.body?.confirmManual !== true) {
+      res.status(409).json({
+        success: false,
+        error:
+          "Use POST /api/complaints/:id/send to submit the notice. If it was sent outside Find_out, repeat this call with confirmManual=true.",
+      });
+      return;
+    }
+
     const updated = await complaintService.updateStatus(String(id), status as ComplaintStatus);
     res.json({
       success: true,
@@ -304,6 +318,75 @@ commonRouter.patch("/complaints/:id/status", async (req: Request, res: Response)
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : "Failed to update complaint status",
+    });
+  }
+});
+
+// Delivery status + real outbound submission for takedown notices.
+commonRouter.get("/complaints/delivery/status", (_req: Request, res: Response) => {
+  const status = complaintDispatchService.status();
+  res.json({ success: true, data: status });
+});
+
+commonRouter.post("/complaints/:id/send", async (req: Request, res: Response) => {
+  try {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    if (!id || !/^[0-9a-fA-F-]{36}$/.test(id)) {
+      res.status(400).json({ success: false, error: "A valid complaint UUID is required." });
+      return;
+    }
+
+    const { complaint, result } = await complaintDispatchService.deliver(id);
+
+    if (!complaint) {
+      res.status(404).json({ success: false, error: "Complaint not found." });
+      return;
+    }
+
+    const httpStatus = result.status === "sent" ? 200 : result.status === "not_configured" ? 503 : 502;
+
+    res.status(httpStatus).json({
+      success: result.status === "sent",
+      data: {
+        complaint,
+        delivery: result,
+      },
+      ...(result.status === "not_configured"
+        ? {
+            error:
+              "No outbound transport is configured, so the notice was NOT submitted. Configure SMTP or COMPLAINT_WEBHOOK_URL first.",
+          }
+        : {}),
+      ...(result.status === "failed" ? { error: result.detail } : {}),
+    });
+  } catch (error) {
+    logger.error("[common.routes] Complaint delivery failed", { error });
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Complaint delivery failed",
+    });
+  }
+});
+
+// Live cyber-security threat feed (CISA KEV by default).
+commonRouter.get("/alerts/feed", async (req: Request, res: Response) => {
+  try {
+    const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 20;
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 20;
+    const search = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const refresh = req.query.refresh === "1";
+
+    const feed = await threatFeedService.getFeed({ limit, search, refresh });
+    res.status(feed.status === "available" ? 200 : 503).json({
+      success: feed.status === "available",
+      data: feed,
+      ...(feed.status === "available" ? {} : { error: feed.detail }),
+    });
+  } catch (error) {
+    logger.error("[common.routes] Threat feed failed", { error });
+    res.status(502).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Threat feed unavailable",
     });
   }
 });

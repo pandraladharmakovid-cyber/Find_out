@@ -9,12 +9,20 @@ export interface AIThreatAnalysisInput {
 }
 
 export interface AIThreatVerdict {
+  verdict: GeminiAnalysisResult["verdict"];
+  riskScore: number;
   isImpersonating: boolean;
   confidenceScore: number;
   reasoning: string;
   threatCategory: string;
   recommendedAction: string;
   rawResponse?: Record<string, unknown>;
+}
+
+function boundedScore(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(100, Math.max(0, value))
+    : 0;
 }
 
 export class AIService {
@@ -38,17 +46,55 @@ export class AIService {
       );
 
       const raw = result as unknown as Record<string, unknown>;
-      const isImpersonating = Boolean(raw.isMalicious ?? raw.isThreat ?? (raw.verdict === "malicious" || raw.verdict === "suspicious"));
-      const confidenceScore = typeof raw.confidenceScore === "number" ? raw.confidenceScore : typeof raw.confidence === "number" ? raw.confidence : 75;
-      const reasoning = (typeof raw.summary === "string" ? raw.summary : typeof raw.reasoning === "string" ? raw.reasoning : "AI analysis completed evaluation of candidate domain.");
-      const threatCategory = (typeof raw.threatType === "string" ? raw.threatType : typeof raw.threatCategory === "string" ? raw.threatCategory : (isImpersonating ? "brand_impersonation" : "benign"));
+      const rawVerdict = raw.verdict;
+      const verdict: AIThreatVerdict["verdict"] =
+        rawVerdict === "clean" ||
+        rawVerdict === "suspicious" ||
+        rawVerdict === "malicious" ||
+        rawVerdict === "phishing" ||
+        rawVerdict === "unverified"
+          ? rawVerdict
+          : "unverified";
+      const confidenceScore = boundedScore(raw.confidenceScore);
+      const riskScore = boundedScore(raw.riskScore);
+      const hasUsableAnalysis = confidenceScore > 0 && verdict !== "unverified";
+      const effectiveVerdict: AIThreatVerdict["verdict"] = hasUsableAnalysis
+        ? verdict
+        : "unverified";
+      const isImpersonating =
+        hasUsableAnalysis &&
+        (verdict === "suspicious" || verdict === "malicious" || verdict === "phishing");
+      const reasoning =
+        typeof raw.summary === "string"
+          ? raw.summary
+          : typeof raw.reasoning === "string"
+            ? raw.reasoning
+            : "AI analysis did not supply a usable explanation.";
+      const threatCategory =
+        effectiveVerdict === "unverified"
+          ? "unverified"
+          : typeof raw.threatType === "string"
+            ? raw.threatType
+            : typeof raw.threatCategory === "string"
+              ? raw.threatCategory
+              : isImpersonating
+                ? "brand_impersonation"
+                : "benign";
+      const recommendedAction =
+        effectiveVerdict === "malicious" || effectiveVerdict === "phishing"
+          ? "takedown_notice"
+          : effectiveVerdict === "suspicious" || effectiveVerdict === "unverified"
+            ? "manual_review"
+            : "continue_monitoring";
 
       return {
+        verdict: effectiveVerdict,
+        riskScore: hasUsableAnalysis ? riskScore : 0,
         isImpersonating,
         confidenceScore,
         reasoning,
         threatCategory,
-        recommendedAction: isImpersonating ? "takedown_notice" : "continue_monitoring",
+        recommendedAction,
         rawResponse: raw,
       };
     } catch (error) {
@@ -56,6 +102,8 @@ export class AIService {
       logger.warn("[ai-service] Gemini reasoning fallback triggered", { error: message });
 
       return {
+        verdict: "unverified",
+        riskScore: 0,
         isImpersonating: false,
         confidenceScore: 0,
         reasoning: `Analysis bypassed due to evaluation failure: ${message}`,

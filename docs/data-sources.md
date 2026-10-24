@@ -2,7 +2,7 @@
 
 | Source | Data collected | Configuration | Failure behavior |
 | --- | --- | --- | --- |
-| Reddit OAuth search | Public discussion posts, author, permalink, text context | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT` | Missing credentials, rate limits, and network failures are reported as unavailable; no findings are inferred from a skipped request. |
+| Bluesky authenticated post search | Public post text, author handle/DID, display name, post URL, creation time and like count | `BLUESKY_HANDLE`, `BLUESKY_APP_PASSWORD` | Missing credentials, authentication failures, rate limits, HTTP errors and timeouts are reported as unavailable; no findings or safety conclusions are inferred from a skipped request. |
 | YouTube Data API v3 | Public video titles, descriptions, channel names/IDs, and video URLs | `YOUTUBE_API_KEY` | Quota, API, and network failures are reported as unavailable. This is video/channel search, not a global account crawl. |
 | Apple App Store Search API | Public software listing names, bundle IDs, seller, description, icon URL, and listing URL | Public search endpoint; no API key | HTTP and timeout failures appear as unavailable. Search results are not exhaustive app-store inventory. |
 | Google Safe Browsing | URL reputation matches | `GOOGLE_SAFE_BROWSING_API_KEY` | When not configured or unavailable, source evidence has no verification; it is not considered a clean result. |

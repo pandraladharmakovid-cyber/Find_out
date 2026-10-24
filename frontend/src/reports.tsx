@@ -1,4 +1,3 @@
-
 import React, { useCallback, useEffect, useState, type FormEvent } from 'react';
 import {
   AlertTriangle,
@@ -10,6 +9,7 @@ import {
   Send,
 } from 'lucide-react';
 import { apiRequest } from './api';
+import type { Translator } from './i18n';
 
 type Complaint = {
   id: string | number;
@@ -18,6 +18,25 @@ type Complaint = {
   reference_id?: string;
   status?: string;
   description?: string;
+};
+
+type LiveFeedItem = {
+  id: string;
+  title: string;
+  vendor: string;
+  product: string;
+  severity: string;
+  dateAdded: string;
+  knownRansomware: boolean;
+  url: string;
+};
+
+type LiveFeed = {
+  status: 'available' | 'unavailable' | 'not_configured';
+  detail: string;
+  fetchedAt: string | null;
+  totalAvailable: number;
+  items: LiveFeedItem[];
 };
 
 type ThreatAlert = {
@@ -62,7 +81,7 @@ function alertSourceName(value?: string): string {
   return new URL(sourceUrl).hostname;
 }
 
-export const ReportsView: React.FC<{ t: (key: string) => string }> = ({ t }) => {
+export const ReportsView: React.FC<{ t: Translator }> = ({ t }) => {
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [alerts, setAlerts] = useState<ThreatAlert[]>([]);
   const [form, setForm] = useState({
@@ -75,6 +94,10 @@ export const ReportsView: React.FC<{ t: (key: string) => string }> = ({ t }) => 
   const [refreshing, setRefreshing] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [liveFeed, setLiveFeed] = useState<LiveFeed | null>(null);
+  const [feedLoading, setFeedLoading] = useState(true);
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [deliveryNotice, setDeliveryNotice] = useState('');
 
   const fetchData = useCallback(async () => {
     setRefreshing(true);
@@ -102,6 +125,55 @@ export const ReportsView: React.FC<{ t: (key: string) => string }> = ({ t }) => 
   useEffect(() => {
     void fetchData();
   }, [fetchData]);
+
+  const loadLiveFeed = useCallback(async (refresh = false) => {
+    setFeedLoading(true);
+    try {
+      const response = await apiRequest<{ data?: LiveFeed }>(
+        `/alerts/feed?limit=8${refresh ? '&refresh=1' : ''}`,
+        { timeoutMs: 25000 },
+      );
+      setLiveFeed(response?.data ?? null);
+    } catch (err) {
+      // A blocked feed must surface as an explanation, never as fake alarms.
+      setLiveFeed({
+        status: 'unavailable',
+        detail: errorMessage(err),
+        fetchedAt: null,
+        totalAvailable: 0,
+        items: [],
+      });
+    } finally {
+      setFeedLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadLiveFeed();
+  }, [loadLiveFeed]);
+
+  async function submitComplaintToRecipient(complaint: Complaint) {
+    setSendingId(String(complaint.id));
+    setDeliveryNotice('');
+    setError('');
+
+    try {
+      const response = await apiRequest<{ data?: { delivery?: { detail?: string; status?: string } } }>(
+        `/complaints/${encodeURIComponent(String(complaint.id))}/send`,
+        { method: 'POST', timeoutMs: 40000 },
+      );
+
+      const detail = response?.data?.delivery?.detail ?? 'The notice was accepted for delivery.';
+      setDeliveryNotice(detail);
+      setSuccess(detail);
+      await fetchData();
+    } catch (err) {
+      setError(errorMessage(err));
+      await fetchData();
+    } finally {
+      setSendingId(null);
+    }
+  }
 
   async function submitComplaint(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -158,7 +230,7 @@ export const ReportsView: React.FC<{ t: (key: string) => string }> = ({ t }) => 
           className="btn-secondary"
         >
           <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
-          Refresh
+          {t('common.refresh')}
         </button>
       </header>
 
@@ -170,6 +242,15 @@ export const ReportsView: React.FC<{ t: (key: string) => string }> = ({ t }) => 
               <p className="font-semibold">Request unsuccessful</p>
               <p className="mt-1 break-words">{error}</p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {deliveryNotice && (
+        <div role="status" className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm text-emerald-200">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 size={19} className="shrink-0" />
+            <p className="font-semibold">{deliveryNotice}</p>
           </div>
         </div>
       )}
@@ -205,6 +286,7 @@ export const ReportsView: React.FC<{ t: (key: string) => string }> = ({ t }) => 
               <option value="facebook">Facebook</option>
               <option value="x">X</option>
               <option value="youtube">YouTube</option>
+              <option value="bluesky">Bluesky</option>
               <option value="google_play">Google Play</option>
               <option value="apple_app_store">Apple App Store</option>
               <option value="other">Other</option>
@@ -274,9 +356,20 @@ export const ReportsView: React.FC<{ t: (key: string) => string }> = ({ t }) => 
                     </p>
                   )}
                 </div>
-                <span className="h-fit w-fit rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-300">
-                  {complaint.status || 'Status unavailable'}
-                </span>
+                <div className="flex shrink-0 flex-col items-end gap-2">
+                  <span className="w-fit rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-300">
+                    {complaint.status || 'Status unavailable'}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void submitComplaintToRecipient(complaint)}
+                    disabled={sendingId === String(complaint.id)}
+                  >
+                    <Send size={14} />
+                    {sendingId === String(complaint.id) ? 'Submitting…' : 'Submit to recipient'}
+                  </button>
+                </div>
               </div>
             </article>
           ))
@@ -284,9 +377,69 @@ export const ReportsView: React.FC<{ t: (key: string) => string }> = ({ t }) => 
       </section>
 
       <section className="space-y-3 border-t border-slate-800 pt-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-emerald-300">
+            <Newspaper size={17} />
+            Live threat feed · CISA KEV
+          </h2>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => void loadLiveFeed(true)}
+            disabled={feedLoading}
+          >
+            <RefreshCw size={14} className={feedLoading ? 'animate-spin' : ''} /> Refresh feed
+          </button>
+        </div>
+
+        {liveFeed?.status === 'available' ? (
+          <>
+            <p className="text-xs leading-5 text-slate-500">
+              {liveFeed.totalAvailable} known-exploited vulnerabilities in the catalogue · fetched{' '}
+              {liveFeed.fetchedAt ? new Date(liveFeed.fetchedAt).toLocaleString() : 'just now'}
+            </p>
+            <div className="grid gap-3 md:grid-cols-2">
+              {liveFeed.items.map((item) => (
+                <article className="surface-card space-y-2 p-4" key={item.id}>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-xs text-emerald-300">
+                      {item.severity}
+                    </span>
+                    <span className="text-xs text-slate-500">{item.dateAdded}</span>
+                  </div>
+                  <h3 className="font-semibold text-white">{item.id}</h3>
+                  <p className="text-sm leading-6 text-slate-400">{item.title}</p>
+                  <p className="text-xs text-slate-500">
+                    {item.vendor} · {item.product}
+                    {item.knownRansomware ? ' · known ransomware use' : ''}
+                  </p>
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-blue-300 hover:underline"
+                  >
+                    Open in CISA catalogue <ExternalLink size={12} />
+                  </a>
+                </article>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="surface-card p-5 text-sm text-slate-400">
+            {feedLoading
+              ? 'Loading the live CISA catalogue…'
+              : liveFeed?.status === 'not_configured'
+                ? 'The live threat feed is disabled in the backend configuration.'
+                : `The live feed could not be read: ${liveFeed?.detail ?? 'unknown error'}. No placeholder bulletins are shown.`}
+          </div>
+        )}
+      </section>
+
+      <section className="space-y-3 border-t border-slate-800 pt-5">
         <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-amber-300">
           <Newspaper size={17} />
-          Cybersecurity alerts
+          Saved security alerts
         </h2>
         <p className="text-xs leading-5 text-slate-500">
           Alert details are displayed as saved; verify them with the linked source before acting.

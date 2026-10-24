@@ -55,7 +55,7 @@ export class ReportsService {
   private generateRecommendations(investigation: InvestigationRecord): string[] {
     const recommendations: string[] = [];
 
-    if (investigation.verdict === "malicious") {
+    if (investigation.verdict === "malicious" || investigation.verdict === "phishing") {
       recommendations.push("Dispatch immediate abuse takedown requests to authoritative domain registrar and upstream DNS providers.");
       recommendations.push("Submit domain indicators to Google Safe Browsing and URLhaus threat feeds.");
       recommendations.push("Notify customer trust and safety channels to monitor for targeted credential replay attempts.");
@@ -63,8 +63,11 @@ export class ReportsService {
       recommendations.push("Enroll target domain into high-frequency surveillance monitoring queue.");
       recommendations.push("Monitor SSL/TLS certificate transparency logs for new hostnames bound to this target.");
       recommendations.push("Prepare draft cease-and-desist documentation in case deceptive activity escalates.");
-    } else {
+    } else if (investigation.verdict === "clean") {
       recommendations.push("Target currently presents low risk profile. Maintain periodic baseline scanning.");
+    } else {
+      recommendations.push("Evidence is insufficient for a clean or malicious determination. Keep the target unverified and review unavailable sources before retrying.");
+      recommendations.push("Do not treat the absence of a threat match as proof of safety.");
     }
 
     return recommendations;
@@ -86,7 +89,9 @@ export class ReportsService {
         [investigationId]
       ),
       query<AuditRecordRow>(
-        `SELECT * FROM audit_logs WHERE investigation_id = $1 ORDER BY created_at ASC;`,
+        `SELECT id, investigation_id, source, status, latency_ms, error_message,
+                attempted_at AS created_at
+         FROM source_audit_logs WHERE investigation_id = $1 ORDER BY attempted_at ASC;`,
         [investigationId]
       ),
     ]);
@@ -147,7 +152,7 @@ ${dossier.summary ?? "Automated threat evaluation complete."}
 ## Identified Evidence Artifacts
 | Source | Reliability | Target Indicator | Observation |
 |---|---|---|---|
-${evidenceRows || "| None | - | - | No suspicious artifacts logged |"}
+${evidenceRows || "| None | - | - | No evidence artifacts were recorded; no conclusion is inferred. |"}
 
 ---
 

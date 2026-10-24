@@ -1,10 +1,10 @@
-
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, CheckCircle2, ExternalLink, FileText, RefreshCw,
   Search, ShieldAlert,
 } from 'lucide-react';
 import { apiRequest } from './api';
+import type { Translator } from './i18n';
 
 type Finding = {
   id: string;
@@ -42,32 +42,57 @@ function percent(value?: number): string {
   return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
 }
 
-export const FindingsView: React.FC = () => {
+const PAGE_SIZE = 100;
+
+type Counters = {
+  total: number;
+  excluded: number;
+  highRisk: number;
+  mediumRisk: number;
+};
+
+export const FindingsView: React.FC<{ t: Translator }> = ({ t }) => {
   const [items, setItems] = useState<Finding[]>([]);
   const [filter, setFilter] = useState<'all' | 'flagged' | 'excluded'>('all');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
+  const [counters, setCounters] = useState<Counters | null>(null);
+  const [hasMore, setHasMore] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (offset = 0) => {
+    const isFirstPage = offset === 0;
+    if (isFirstPage) setLoading(true);
+    else setLoadingMore(true);
     setError('');
 
     try {
-      const response = await apiRequest<{ data?: Finding[] }>('/monitoring/candidates');
+      const response = await apiRequest<{
+        data?: Finding[];
+        summary?: Counters;
+        pagination?: { limit: number; offset: number };
+      }>(`/monitoring/candidates?limit=${PAGE_SIZE}&offset=${offset}`, {
+        // The default 20 s client timeout was the source of the "Findings &
+        // Evidence timed out after 20 seconds" report.
+        timeoutMs: 45000,
+      });
       if (!Array.isArray(response?.data)) {
         throw new Error('The findings API returned an unexpected response.');
       }
-      setItems(response.data);
+      setItems((current) => (isFirstPage ? response.data ?? [] : [...current, ...(response.data ?? [])]));
+      setHasMore((response.data?.length ?? 0) === PAGE_SIZE);
+      if (response.summary) setCounters(response.summary);
     } catch (err) {
       setError(messageOf(err));
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }, []);
 
   useEffect(() => {
-    void load();
+    void load(0);
   }, [load]);
 
   const filtered = useMemo(() => items.filter((item) => {
@@ -89,15 +114,14 @@ export const FindingsView: React.FC = () => {
             Evidence ledger
           </p>
           <h1 className="flex items-center gap-3 text-2xl font-bold text-white">
-            <FileText className="text-cyan-400" /> Findings & Evidence
+            <FileText className="text-cyan-400" /> {t('findings.title')}
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
-            Review monitoring candidates, evidence indicators and official-asset exclusions.
-            A risk score is an indicator, not proof of malicious intent.
+            {t('findings.subtitle')}
           </p>
         </div>
-        <button type="button" onClick={() => void load()} disabled={loading} className="btn-secondary">
-          <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
+        <button type="button" onClick={() => void load(0)} disabled={loading} className="btn-secondary">
+          <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> {t('common.refresh')}
         </button>
       </header>
 
@@ -107,16 +131,16 @@ export const FindingsView: React.FC = () => {
           <div>
             <p className="font-semibold">Findings could not be loaded</p>
             <p className="mt-1 break-words">{error}</p>
-            <button className="btn-secondary mt-3" onClick={() => void load()} type="button">Retry</button>
+            <button className="btn-secondary mt-3" onClick={() => void load(0)} type="button">Retry</button>
           </div>
         </div>
       )}
 
       <section className="grid gap-3 sm:grid-cols-3">
         {[
-          { label: 'Total candidates', value: items.length },
-          { label: 'Potential findings', value: items.filter(item => !item.is_official_excluded).length },
-          { label: 'Official exclusions', value: items.filter(item => item.is_official_excluded).length },
+          { label: 'Total candidates', value: counters?.total ?? items.length },
+          { label: 'High-risk candidates', value: counters?.highRisk ?? items.filter(item => (item.risk_score ?? 0) >= 70 && !item.is_official_excluded).length },
+          { label: 'Official exclusions', value: counters?.excluded ?? items.filter(item => item.is_official_excluded).length },
         ].map(metric => (
           <div className="surface-card p-4" key={metric.label}>
             <p className="text-sm text-slate-400">{metric.label}</p>
@@ -172,6 +196,11 @@ export const FindingsView: React.FC = () => {
           </div>
         ) : (
           <div className="space-y-3">
+            {hasMore && (
+              <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2 text-xs text-slate-400">
+                Showing the first {items.length} of {counters?.total ?? '…'} candidates. Use “Load more” to fetch the next page.
+              </div>
+            )}
             {filtered.map(item => {
               const excluded = Boolean(item.is_official_excluded);
               const score = typeof item.risk_score === 'number' ? item.risk_score : null;
@@ -217,6 +246,17 @@ export const FindingsView: React.FC = () => {
                 </article>
               );
             })}
+
+            {hasMore && (
+              <button
+                type="button"
+                className="btn-secondary w-full"
+                onClick={() => void load(items.length)}
+                disabled={loadingMore}
+              >
+                <RefreshCw size={15} className={loadingMore ? 'animate-spin' : ''} /> Load more candidates
+              </button>
+            )}
           </div>
         )}
       </section>

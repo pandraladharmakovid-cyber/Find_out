@@ -1,41 +1,34 @@
-// @ts-ignore
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import * as urlSafetyModule from '../backend/src/url-safety';
-import * as investigationsModule from '../backend/src/investigations';
-import * as recoveryModule from '../backend/src/recovery';
+import { UrlSafetyEngine } from '../backend/src/url-safety';
+import { RecoveryService } from '../backend/src/recovery';
+import { validateSafeUrl } from '../backend/src/middleware';
 
 describe('Application Security & Investigation Defenses (Modules 9, 10, 11 & 19)', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
   describe('SSRF & Malicious Input Sanitation (Module 19)', () => {
-    it('blocks internal loopback and private IP addresses from inspection', async () => {
-      const urlSafety: any = new (urlSafetyModule as any).UrlSafetyEngine();
-      const checkFn = urlSafety.validateTargetUrl || urlSafety.analyze || urlSafety.checkUrl;
-
+    it('blocks internal loopback and private IP addresses from inspection', () => {
+      const urlSafety = new UrlSafetyEngine();
       const forbiddenTargets = [
         'http://127.0.0.1:8080/admin',
         'http://localhost:3000/api',
-        'http://169.254.169.254/latest/meta-data/', // AWS metadata service
+        'http://169.254.169.254/latest/meta-data/',
         'http://10.0.0.1/internal',
         'http://192.168.1.1/router',
+        'http://[::1]/admin',
+        'http://[::ffff:127.0.0.1]/admin',
+        'http://[fc00::1]/admin',
       ];
 
       for (const target of forbiddenTargets) {
-        if (typeof checkFn === 'function') {
-          const result = await checkFn.call(urlSafety, target);
-          const isBlocked = result?.safe === false || result?.isAllowed === false || result?.blocked === true;
-          expect(isBlocked).toBe(true);
-        } else {
-          const isPrivateIp = /(^127\.)|(^10\.)|(^192\.168\.)|(^169\.254\.)|localhost/.test(target.replace(/^https?:\/\//, ''));
-          expect(isPrivateIp).toBe(true);
-        }
+        const result = urlSafety.validateTargetUrl(target);
+        expect(result.blocked, target).toBe(true);
+        expect(result.isAllowed, target).toBe(false);
+        expect(validateSafeUrl(target), target).toBe(false);
       }
     });
 
-    it('rejects unsupported and dangerous URI protocols', async () => {
+    it('rejects unsupported and dangerous URI protocols', () => {
+      const urlSafety = new UrlSafetyEngine();
       const dangerousProtocols = [
         'file:///etc/passwd',
         'gopher://127.0.0.1:70/',
@@ -43,70 +36,44 @@ describe('Application Security & Investigation Defenses (Modules 9, 10, 11 & 19)
         'data:text/html,<script>alert(1)</script>',
       ];
 
-      const urlSafety: any = new (urlSafetyModule as any).UrlSafetyEngine();
-      const checkFn = urlSafety.validateTargetUrl || urlSafety.analyze || urlSafety.checkUrl;
-
       for (const target of dangerousProtocols) {
-        if (typeof checkFn === 'function') {
-          const result = await checkFn.call(urlSafety, target);
-          const isBlocked = result?.safe === false || result?.isAllowed === false || result?.blocked === true;
-          expect(isBlocked).toBe(true);
-        } else {
-          expect(/^https?:\/\//.test(target)).toBe(false);
-        }
+        expect(urlSafety.validateTargetUrl(target).blocked, target).toBe(true);
+        expect(validateSafeUrl(target), target).toBe(false);
       }
     });
   });
 
-  describe('Original 9 Security Features (Module 10 & 11)', () => {
-    it('evaluates target safety without fabricating evidence', async () => {
-      const investigator: any = new (investigationsModule as any).InvestigationService
-        ? new (investigationsModule as any).InvestigationService()
-        : (investigationsModule as any);
-
-      const inspectFn = investigator.inspect || investigator.investigateTarget || investigator.analyze;
-
-      if (typeof inspectFn === 'function') {
-        const report = await inspectFn.call(investigator, 'https://google.com');
-        expect(report).toBeDefined();
-        expect(report.safetyVerdict !== undefined || report.is_safe !== undefined || report.safe !== undefined).toBe(true);
-      } else {
-        expect(true).toBe(true);
-      }
+  describe('Original security and recovery behaviors', () => {
+    it('normalizes a public HTTPS target without fabricating an external threat result', () => {
+      const result = new UrlSafetyEngine().analyze('https://google.com');
+      expect(result.blocked).toBe(false);
+      expect(result.isAllowed).toBe(true);
+      expect(result.hostname).toBe('google.com');
+      expect(result.riskScore).toBe(0);
     });
 
-    it('generates incident recovery action plans based on user exposure', async () => {
-      const recoveryEngine: any = new (recoveryModule as any).RecoveryService
-        ? new (recoveryModule as any).RecoveryService()
-        : (recoveryModule as any);
+    it('generates real credential-exposure recovery steps without claiming compromise', () => {
+      const assessment = new RecoveryService().assessIncident(
+        'https://suspicious-login.test',
+        'password_entered',
+      );
 
-      const planFn = recoveryEngine.generatePlan || recoveryEngine.getChecklist || recoveryEngine.buildRecoveryPlan;
-
-      if (typeof planFn === 'function') {
-        // Scenario: User entered a password into an unknown link
-        const plan = await planFn.call(recoveryEngine, {
-          incidentType: 'password_entered',
-          platform: 'twitter',
-        });
-
-        expect(plan).toBeDefined();
-        const steps = Array.isArray(plan) ? plan : (plan.steps || plan.checklist || []);
-        expect(steps.length).toBeGreaterThan(0);
-      } else {
-        expect(true).toBe(true);
-      }
+      expect(assessment.recovery_steps.length).toBeGreaterThan(0);
+      expect(assessment.recovery_steps.join(' ')).toContain('change the exposed password');
+      expect(assessment.safety_verdict).toBe('unverified');
+      expect(assessment.compromised_count).toBeNull();
+      expect(assessment.evidence_note).toContain('No external');
     });
 
-    it('differentiates attack origin channels and spread risks', async () => {
-      const mockSpreadAssessment = {
-        deliveryChannel: 'social_direct_message',
-        lateralSpreadConfirmed: false,
-        deviceCheckRequired: true,
-        credentialsCompromised: true,
-      };
+    it('derives delivery-channel guidance from the actual submitted incident', () => {
+      const assessment = new RecoveryService().assessIncident(
+        'WhatsApp message with a suspicious link',
+        'clicked_link',
+      );
 
-      expect(mockSpreadAssessment.deliveryChannel).toBe('social_direct_message');
-      expect(mockSpreadAssessment.deviceCheckRequired).toBe(true);
+      expect(assessment.delivery_channel).toContain('WhatsApp');
+      expect(assessment.device_risk).toContain('No device compromise is established');
+      expect(assessment.recovery_steps.length).toBeGreaterThan(0);
     });
   });
 });

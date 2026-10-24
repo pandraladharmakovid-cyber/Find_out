@@ -40,7 +40,9 @@ export type CreateInvestigationInput = z.infer<typeof createInvestigationSchema>
 export const createEvidenceSchema = z.object({
   source: z.enum([
     "gemini",
+    // Accept legacy evidence values so historical clients/records remain compatible.
     "reddit",
+    "bluesky",
     "youtube",
     "safebrowsing",
     "urlhaus",

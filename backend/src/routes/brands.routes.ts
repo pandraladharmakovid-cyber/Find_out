@@ -1,9 +1,17 @@
 import { Router, type Request, type Response } from "express";
-import { brandService } from "../brands";
-import { BrandAssetsRepository, ExclusionRulesRepository } from "../repositories";
+import { createHash, timingSafeEqual } from "node:crypto";
+import {
+  BrandProfileError,
+  brandService,
+  normalizeBrandPrimaryDomain,
+  normalizeBrandWebsite,
+} from "../brands";
+import { BrandAssetsRepository } from "../repositories";
 import { logger } from "../utils/logger";
-import { query } from "../db";
 import { logoSimilarityService } from "../logo-similarity.service";
+import { assetService, AssetVerificationError, type AssetType } from "../assets";
+import type { DomainChallengeMethod } from "../asset-proof";
+import { config } from "../config";
 
 export const brandsRouter = Router();
 
@@ -42,20 +50,25 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
       return;
     }
 
-    let parsedDomain: URL;
+    let normalizedPrimaryDomain: string;
+    let associatedDomains: string[];
+    let normalizedWebsite: string | null;
     try {
-      parsedDomain = new URL(
-        /^https?:\/\//i.test(suppliedDomain.trim())
-          ? suppliedDomain.trim()
-          : `https://${suppliedDomain.trim()}`
-      );
-      if (!["http:", "https:"].includes(parsedDomain.protocol)) throw new Error("Unsupported protocol");
-    } catch {
-      res.status(400).json({
-        success: false,
-        error: "The brand primary domain must be a valid HTTP or HTTPS hostname.",
-      });
-      return;
+      normalizedPrimaryDomain = normalizeBrandPrimaryDomain(suppliedDomain);
+      associatedDomains = domainList.map(normalizeBrandPrimaryDomain);
+      normalizedWebsite = typeof website === "string" && website.trim()
+        ? normalizeBrandWebsite(website)
+        : null;
+    } catch (error) {
+      if (error instanceof BrandProfileError) {
+        res.status(error.statusCode).json({
+          success: false,
+          error: error.message,
+          code: error.code,
+        });
+        return;
+      }
+      throw error;
     }
 
     const normalizeStringList = (value: unknown): string[] =>
@@ -65,13 +78,13 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
 
     const brand = await brandService.createBrand({
       name: String(name).trim(),
-      primaryDomain: parsedDomain.hostname.toLowerCase(),
+      primaryDomain: normalizedPrimaryDomain,
       industry: industry ? String(industry) : undefined,
       lookalikeThreshold: typeof lookalikeThreshold === "number" ? lookalikeThreshold : 0.75,
       alternateNames: normalizeStringList(alternateNames ?? alternate_names),
-      associatedDomains: domainList.map((value) => value.trim()).filter(Boolean),
+      associatedDomains,
       keywords: normalizeStringList(keywords),
-      website: website ? String(website).trim() : parsedDomain.origin,
+      website: normalizedWebsite,
       logoUrl: logoUrl ?? logo_url ?? null,
       description: description ?? null,
     });
@@ -79,8 +92,21 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
     res.status(201).json({
       success: true,
       data: brand,
+      meta: {
+        official: false,
+        verificationStatus: "UNVERIFIED",
+        message: "Profile saved for review. Verify its primary domain before treating it as official.",
+      },
     });
   } catch (error) {
+    if (error instanceof BrandProfileError) {
+      res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
+      return;
+    }
     logger.error("[brands.routes] Failed to create brand", { error });
     res.status(500).json({
       success: false,
@@ -96,10 +122,27 @@ brandsRouter.get("/", async (req: Request, res: Response) => {
 
     const brands = await brandService.listBrands(limit, offset);
     const brandsWithAssets = await Promise.all(
-      brands.map(async (brand) => ({
-        ...brand,
-        assets: await BrandAssetsRepository.findByBrandId(brand.id),
-      }))
+      brands.map(async (brand) => {
+        const assets = await BrandAssetsRepository.findByBrandId(brand.id);
+
+        // Logo resolution order, exposed to the frontend so it renders a real
+        // logo instead of an icon: uploaded logo asset → verified asset URL →
+        // stored logo_url → the primary domain (resolved on demand).
+        const logoAsset = assets.find(
+          (asset) =>
+            asset.asset_type === "logo" &&
+            Boolean(asset.canonical_url || asset.image_data),
+        );
+
+        return {
+          ...brand,
+          assets,
+          logo_url: brand.logo_url ?? null,
+          logo_asset_url: logoAsset?.canonical_url ?? null,
+          logo_domain: brand.primary_domain ?? null,
+          logo_image_url: `/api/intelligence/logo/brand/${brand.id}/image`,
+        };
+      })
     );
     res.json({
       success: true,
@@ -143,6 +186,7 @@ brandsRouter.get("/:id", async (req: Request, res: Response) => {
 
 brandsRouter.patch("/:id", async (req: Request, res: Response) => {
   try {
+    requireRegistryOperator(req);
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     if (!id) {
       res.status(400).json({ success: false, error: "Brand ID is required" });
@@ -155,11 +199,7 @@ brandsRouter.patch("/:id", async (req: Request, res: Response) => {
       data: updated,
     });
   } catch (error) {
-    logger.error("[brands.routes] Failed to update brand", { error });
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : "Failed to update brand",
-    });
+    assetError(res, error, "Failed to update brand");
   }
 });
 
@@ -167,8 +207,67 @@ brandsRouter.patch("/:id", async (req: Request, res: Response) => {
 // 2. Official Brand Assets Management
 // ==========================================
 
+function requireRegistryOperator(req: Request): void {
+  const configured = config.ASSET_REGISTRY_ADMIN_KEY;
+  if (configured.length < 32) {
+    throw new AssetVerificationError(
+      503,
+      "REGISTRY_OPERATOR_NOT_CONFIGURED",
+      "Registry administration is disabled until a server-only operator key of at least 32 characters is configured.",
+    );
+  }
+  const supplied = req.get("x-registry-admin-key") ?? "";
+  const expectedHash = createHash("sha256").update(configured, "utf8").digest();
+  const suppliedHash = createHash("sha256").update(supplied, "utf8").digest();
+  if (!supplied || !timingSafeEqual(expectedHash, suppliedHash)) {
+    throw new AssetVerificationError(
+      403,
+      "REGISTRY_OPERATOR_REQUIRED",
+      "A valid registry operator credential is required for this administrative operation.",
+    );
+  }
+}
+
+function assetError(
+  res: Response,
+  error: unknown,
+  fallback: string,
+): void {
+  if (error instanceof AssetVerificationError) {
+    res.status(error.statusCode).json({
+      success: false,
+      error: error.message,
+      code: error.code,
+      details: error.details ?? null,
+    });
+    return;
+  }
+  logger.error("[brands.routes] Asset workflow failed", {
+    error: error instanceof Error ? error.message : "Unknown error",
+  });
+  res.status(500).json({
+    success: false,
+    error: error instanceof Error ? error.message : fallback,
+  });
+}
+
 brandsRouter.post("/:brandId/assets", async (req: Request, res: Response) => {
   try {
+    // Verification is a server-owned state. Reject self-approval attempts rather
+    // than silently accepting a forged trust flag with the submission.
+    if (
+      Object.prototype.hasOwnProperty.call(req.body ?? {}, "is_verified") ||
+      Object.prototype.hasOwnProperty.call(req.body ?? {}, "verified") ||
+      Object.prototype.hasOwnProperty.call(req.body ?? {}, "verification_status")
+    ) {
+      res.status(403).json({
+        success: false,
+        error: "Verification status cannot be set by an asset submission.",
+        code: "SELF_APPROVAL_FORBIDDEN",
+      });
+      return;
+    }
+
     const brandId = Array.isArray(req.params.brandId) ? req.params.brandId[0] : req.params.brandId;
     const {
       assetType,
@@ -181,7 +280,6 @@ brandsRouter.post("/:brandId/assets", async (req: Request, res: Response) => {
       canonical_url,
       meta,
       metadata,
-      is_verified,
       imageBase64,
       imageMime,
     } = req.body;
@@ -284,39 +382,34 @@ brandsRouter.post("/:brandId/assets", async (req: Request, res: Response) => {
       return;
     }
 
-    const result = await BrandAssetsRepository.create({
-      brand_id: String(brandId),
-      asset_type: resolvedType.toLowerCase(),
+    const result = await assetService.registerAsset({
+      brandId: String(brandId),
+      assetType: resolvedType.toLowerCase() as AssetType,
       platform: typeof platform === "string" && platform.trim() ? platform.trim().toLowerCase() : "unknown",
-      identifier: resolvedIdentifier.trim(),
       value: resolvedIdentifier.trim(),
-      canonical_url: canonicalAssetUrl,
-      hash_signature: logoHash,
-      image_data: logoImage,
-      is_verified: typeof is_verified === "boolean" ? is_verified : false,
+      canonicalUrl: canonicalAssetUrl,
+      hashSignature: logoHash,
+      imageData: logoImage,
       metadata: {
         ...(meta ?? {}),
         ...(metadata ?? {}),
         ...(typeof imageMime === "string" ? { imageMime } : {}),
       },
     });
-    if (["domain", "subdomain", "website"].includes(resolvedType.toLowerCase())) {
-      await ExclusionRulesRepository.addRule(
-        resolvedIdentifier.trim(),
-        `Registered official ${resolvedType.toLowerCase()} for brand ${brandId}`
-      );
-    }
 
-    res.status(201).json({
+    res.status(result.created ? 201 : 200).json({
       success: true,
-      data: result,
+      data: result.asset,
+      meta: {
+        created: result.created,
+        trusted: result.asset.is_verified,
+        message: result.asset.is_verified
+          ? "Existing verified asset returned unchanged."
+          : "Asset stored as pending verification. No exclusion was created.",
+      },
     });
   } catch (error) {
-    logger.error("[brands.routes] Failed to create brand asset", { error });
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : "Failed to associate asset with brand",
-    });
+    assetError(res, error, "Failed to associate asset with brand");
   }
 });
 
@@ -327,54 +420,117 @@ brandsRouter.get("/:brandId/assets", async (req: Request, res: Response) => {
       res.status(400).json({ success: false, error: "Brand ID is required" });
       return;
     }
-
-    const result = await query(
-      `SELECT id, brand_id, asset_type, platform, identifier, value, canonical_url,
-              hash_signature, is_verified, metadata, created_at, updated_at
-       FROM official_assets WHERE brand_id = $1 ORDER BY created_at DESC;`,
-      [String(brandId)]
-    );
-
-    res.json({
-      success: true,
-      count: result.rows.length,
-      data: result.rows,
-    });
+    const result = await assetService.listAssetsByBrand(String(brandId));
+    res.json({ success: true, count: result.length, data: result });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : "Failed to retrieve brand assets",
-    });
+    assetError(res, error, "Failed to retrieve brand assets");
   }
 });
 
+brandsRouter.post(
+  "/:brandId/assets/:assetId/verification-challenges",
+  async (req: Request, res: Response) => {
+    try {
+      const brandId = String(req.params.brandId);
+      const assetId = String(req.params.assetId);
+      const method = String(req.body?.method ?? "DNS_TXT").toUpperCase() as DomainChallengeMethod;
+      const challenge = await assetService.createDomainChallenge(brandId, assetId, method);
+      res.status(201).json({ success: true, data: challenge });
+    } catch (error) {
+      assetError(res, error, "Failed to create verification challenge");
+    }
+  },
+);
+
+brandsRouter.post(
+  "/:brandId/assets/:assetId/verification-challenges/:challengeId/verify",
+  async (req: Request, res: Response) => {
+    try {
+      const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+      if (!token || token.length > 512) {
+        res.status(400).json({ success: false, error: "A valid challenge token is required." });
+        return;
+      }
+      const asset = await assetService.verifyDomainChallenge({
+        brandId: String(req.params.brandId),
+        assetId: String(req.params.assetId),
+        challengeId: String(req.params.challengeId),
+        token,
+      });
+      res.json({ success: true, data: asset });
+    } catch (error) {
+      assetError(res, error, "Domain verification failed");
+    }
+  },
+);
+
+brandsRouter.post(
+  "/:brandId/assets/:assetId/verify-association",
+  async (req: Request, res: Response) => {
+    try {
+      const asset = await assetService.verifyAssociation(
+        String(req.params.brandId),
+        String(req.params.assetId),
+      );
+      res.json({ success: true, data: asset });
+    } catch (error) {
+      assetError(res, error, "Asset association verification failed");
+    }
+  },
+);
+
+brandsRouter.post(
+  "/:brandId/assets/:assetId/revoke",
+  async (req: Request, res: Response) => {
+    try {
+      requireRegistryOperator(req);
+      const reason = typeof req.body?.reason === "string"
+        ? req.body.reason
+        : "Ownership or authorization revoked by registry user.";
+      const asset = await assetService.revokeAsset(
+        String(req.params.brandId),
+        String(req.params.assetId),
+        reason,
+      );
+      res.json({ success: true, data: asset });
+    } catch (error) {
+      assetError(res, error, "Failed to revoke asset");
+    }
+  },
+);
+
+brandsRouter.get(
+  "/:brandId/assets/:assetId/verification-events",
+  async (req: Request, res: Response) => {
+    try {
+      const events = await assetService.listVerificationEvents(
+        String(req.params.brandId),
+        String(req.params.assetId),
+      );
+      res.json({ success: true, count: events.length, data: events });
+    } catch (error) {
+      assetError(res, error, "Failed to retrieve verification history");
+    }
+  },
+);
+
 brandsRouter.delete("/:brandId/assets/:assetId", async (req: Request, res: Response) => {
   try {
-    const brandId = Array.isArray(req.params.brandId) ? req.params.brandId[0] : req.params.brandId;
-    const assetId = Array.isArray(req.params.assetId) ? req.params.assetId[0] : req.params.assetId;
-    if (!assetId || !brandId) {
-      res.status(400).json({ success: false, error: "Brand ID and asset ID are required" });
-      return;
-    }
-
-    const deleted = await query(
-      `DELETE FROM official_assets WHERE id = $1 AND brand_id = $2 RETURNING id;`,
-      [String(assetId), String(brandId)]
+    requireRegistryOperator(req);
+    const brandId = String(req.params.brandId);
+    const assetId = String(req.params.assetId);
+    const asset = await assetService.revokeAsset(
+      brandId,
+      assetId,
+      "Asset removal requested; retained as a revocation audit record.",
     );
-    if (deleted.rowCount === 0) {
-      res.status(404).json({ success: false, error: "Official asset not found for this brand" });
-      return;
-    }
-
     res.json({
       success: true,
-      message: "Asset removed successfully",
+      message: "Asset trust revoked; audit history retained.",
+      data: asset,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : "Failed to delete brand asset",
-    });
+    assetError(res, error, "Failed to revoke brand asset");
   }
 });
 

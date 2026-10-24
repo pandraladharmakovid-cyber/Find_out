@@ -9,7 +9,7 @@
 ## 2. Run social and app monitoring
 
 1. Select the brand under **Social & App Monitoring** and start a scan.
-2. Show per-source availability. Reddit and YouTube require credentials; Apple App Store search uses its public API. If a source is unavailable, point out the explicit unavailable status rather than treating the zero results as clean.
+2. Show per-source availability. Bluesky requires a handle and generated App Password, and YouTube requires an API key; Apple App Store search uses its public API. If a source is unavailable, point out the explicit unavailable status rather than treating zero results as clean.
 3. Review listings with name, publisher, description, and (when configured and retrievable) actual icon/logo similarity evidence.
 4. Confirm an exact registered social ID/app ID or store URL is marked **Official asset excluded** and has zero assigned risk.
 

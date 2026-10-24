@@ -95,6 +95,26 @@ export class LogoSimilarityService {
     });
   }
 
+  /**
+   * Compares an uploaded image buffer against an HTTPS reference image.
+   * Used by the "compare my logo against a suspect icon" workflow where the
+   * suspect icon was uploaded but the registered logo is a URL.
+   */
+  async compareImageBufferToUrl(params: {
+    targetImage: Buffer;
+    referenceAssetUri: string;
+    threshold?: number;
+  }): Promise<LogoComparisonResult> {
+    const referenceImage = await this.fetchImage(params.referenceAssetUri);
+    return this.compareImageBuffers({
+      targetImage: params.targetImage,
+      referenceImage,
+      targetImageUri: "uploaded-suspect",
+      referenceAssetUri: params.referenceAssetUri,
+      threshold: params.threshold,
+    });
+  }
+
   private async fetchImage(uri: string): Promise<Buffer> {
     let url: URL;
     try {

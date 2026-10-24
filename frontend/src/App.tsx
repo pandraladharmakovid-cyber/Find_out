@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { Activity, ShieldAlert } from 'lucide-react';
 
@@ -7,25 +6,34 @@ import { DashboardView } from './dashboard';
 import { BrandsView } from './brands';
 import { MonitoringView } from './monitoring';
 import { FindingsView } from './findings';
+import { DetectionsView } from './detections';
 import { InvestigationsView } from './investigations';
 import { RecoveryView } from './recovery';
 import { ReportsView } from './reports';
+import { AgentView } from './agent';
+import { IntelligenceView } from './intelligence';
 import { useTranslation } from './i18n';
 
 type TabId =
   | 'dashboard'
+  | 'copilot'
   | 'brands'
   | 'monitoring'
+  | 'detections'
   | 'findings'
+  | 'lookalike'
   | 'investigations'
   | 'recovery'
   | 'reports';
 
 const validTabs: TabId[] = [
   'dashboard',
+  'copilot',
   'brands',
   'monitoring',
+  'detections',
   'findings',
+  'lookalike',
   'investigations',
   'recovery',
   'reports',
@@ -35,6 +43,7 @@ export default function App() {
   const { t, language, setLanguage } = useTranslation();
 
   const [activeTab, setActiveTab] = useState<TabId>('dashboard');
+  const [investigationTarget, setInvestigationTarget] = useState('');
 
   const navigate = (tab: string): void => {
     if (validTabs.includes(tab as TabId)) {
@@ -48,13 +57,38 @@ export default function App() {
         return <BrandsView t={t} />;
 
       case 'monitoring':
-        return <MonitoringView t={t} />;
+        return (
+          <MonitoringView
+            t={t}
+            onDeepInspect={(target) => {
+              setInvestigationTarget(target);
+              setActiveTab('investigations');
+            }}
+          />
+        );
+
+      case 'detections':
+        return <DetectionsView t={t} />;
 
       case 'findings':
-        return <FindingsView />;
+        return <FindingsView t={t} />;
+
+      case 'lookalike':
+        return (
+          <IntelligenceView
+            t={t}
+            onInvestigate={(target) => {
+              setInvestigationTarget(target);
+              setActiveTab('investigations');
+            }}
+          />
+        );
+
+      case 'copilot':
+        return <AgentView t={t} />;
 
       case 'investigations':
-        return <InvestigationsView t={t} />;
+        return <InvestigationsView t={t} defaultTarget={investigationTarget} />;
 
       case 'recovery':
         return <RecoveryView t={t} />;
@@ -92,14 +126,14 @@ export default function App() {
               <span className="font-semibold text-slate-300">
                 Find_out
               </span>
-              {' '}· Digital Risk Protection Platform
+              {' '}· {t('app.tagline')}
             </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <Activity className="h-3.5 w-3.5 text-emerald-400" />
             <span>
-              Evidence-first analysis · Findings depend on available sources
+              {t('app.description')}
             </span>
           </div>
         </div>

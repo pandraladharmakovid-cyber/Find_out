@@ -7,10 +7,10 @@ flowchart LR
   API --> Profile[Brand profile and official-asset registry]
   Profile --> DB[(PostgreSQL)]
   API --> Orchestrator[Monitoring orchestrator]
-  Orchestrator --> Reddit[Reddit OAuth search]
+  Orchestrator --> Bluesky[Bluesky authenticated post search]
   Orchestrator --> YouTube[YouTube Data API search]
   Orchestrator --> Apple[Apple App Store Search API]
-  Reddit --> Normalize[Normalize source results]
+  Bluesky --> Normalize
   YouTube --> Normalize
   Apple --> Normalize
   Profile --> Exclusion[Exact verified URL / ID exclusion]

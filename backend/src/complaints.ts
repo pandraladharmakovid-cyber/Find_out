@@ -127,25 +127,47 @@ Reporter Contact: ${dto.brandContactEmail}
       targetUrl: dto.targetUrl,
     });
 
+    // The table carries both the legacy report columns (platform,
+    // claim_description, complaint_category) and the newer complaint columns.
+    // Every NOT NULL column must be populated or the insert fails.
+    let platform = "web";
+    try {
+      platform = new URL(dto.targetUrl).hostname.replace(/^www\./, "");
+    } catch {
+      platform = "web";
+    }
+
     const text = `
       INSERT INTO complaints (
-        investigation_id, brand_id, complaint_type, recipient_email, target_url,
-        status, subject, body_text, metadata
-      ) VALUES ($1, $2, $3, $4, $5, 'generated', $6, $7, $8)
+        investigation_id, brand_id, platform, target_identifier, target_url,
+        complaint_category, description, claim_description, reporter_email,
+        complaint_type, recipient_email, status, submission_status, subject,
+        body_text, metadata
+      ) VALUES (
+        $1, $2, $3, $4, $5,
+        'brand_impersonation', $6, $6, $7,
+        $8, $9, 'generated', 'DRAFT', $10,
+        $11, $12
+      )
       RETURNING *;
     `;
 
     const res = await query<ComplaintRecord>(text, [
       dto.investigationId,
       dto.brandId,
+      platform,
+      dto.targetUrl,
+      dto.targetUrl,
+      dto.infringingEvidenceSummary ?? `Impersonation of ${dto.brandName} at ${dto.targetUrl}.`,
+      dto.brandContactEmail,
       dto.complaintType,
       dto.recipientEmail,
-      dto.targetUrl,
       subject,
       bodyText,
       JSON.stringify({
         trademarkNumber: dto.trademarkNumber ?? null,
         evidenceSummary: dto.infringingEvidenceSummary ?? null,
+        brandName: dto.brandName,
       }),
     ]);
 
@@ -173,16 +195,18 @@ Reporter Contact: ${dto.brandContactEmail}
    */
   async updateStatus(id: string, status: ComplaintStatus): Promise<ComplaintRecord> {
     const sentAtSql = status === "sent" ? "sent_at = NOW()," : "";
+    const submissionStatus = status === "sent" ? "SUBMITTED" : status.toUpperCase();
     const text = `
       UPDATE complaints
       SET status = $2,
+          submission_status = $3,
           ${sentAtSql}
           updated_at = NOW()
       WHERE id = $1
       RETURNING *;
     `;
 
-    const res = await query<ComplaintRecord>(text, [id, status]);
+    const res = await query<ComplaintRecord>(text, [id, status, submissionStatus]);
     const updated = res.rows[0];
     if (!updated) {
       throw new Error(`Complaint with id ${id} not found`);

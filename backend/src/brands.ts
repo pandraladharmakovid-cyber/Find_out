@@ -1,7 +1,80 @@
 import { query, withTransaction } from "./db";
 import { logger } from "./utils/logger";
-import { ExclusionRulesRepository } from "./repositories";
 import type { QueryResultRow } from "pg";
+import { isIP } from "node:net";
+import { normalizeTargetUrl, urlSafetyEngine } from "./url-safety";
+
+export class BrandProfileError extends Error {
+  constructor(
+    public readonly statusCode: number,
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BrandProfileError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Validates the public domain eligibility required before a profile can be saved.
+ * This is not an ownership assertion; primary-domain proof happens afterwards.
+ */
+export function normalizeBrandPrimaryDomain(domainInput: string): string {
+  let normalized: string;
+  try {
+    normalized = normalizeTargetUrl(domainInput);
+  } catch (error) {
+    throw new BrandProfileError(
+      400,
+      "INVALID_PRIMARY_DOMAIN",
+      error instanceof Error ? error.message : "Enter a valid primary domain.",
+    );
+  }
+  const validation = urlSafetyEngine.validateTargetUrl(normalized);
+  if (!validation.isAllowed) {
+    throw new BrandProfileError(
+      400,
+      "INVALID_PRIMARY_DOMAIN",
+      validation.reason ?? "The primary domain is not eligible for a public brand profile.",
+    );
+  }
+  const hostname = validation.hostname.toLowerCase().replace(/\.$/, "");
+  const labels = hostname.split(".");
+  const validLabel = (label: string) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+  const validTld = (label: string) => /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+  if (
+    isIP(hostname) !== 0 ||
+    hostname.length > 253 ||
+    labels.length < 2 ||
+    labels.some((label) => !validLabel(label)) ||
+    !validTld(labels[labels.length - 1] ?? "")
+  ) {
+    throw new BrandProfileError(
+      400,
+      "INVALID_PRIMARY_DOMAIN",
+      "Enter an eligible public domain name, not an IP address, local name, or malformed hostname.",
+    );
+  }
+  return hostname;
+}
+
+export function normalizeBrandWebsite(websiteInput: string): string {
+  try {
+    const normalized = normalizeTargetUrl(websiteInput);
+    normalizeBrandPrimaryDomain(normalized);
+    return new URL(normalized).origin;
+  } catch (error) {
+    if (error instanceof BrandProfileError) {
+      throw new BrandProfileError(error.statusCode, "INVALID_BRAND_WEBSITE", error.message);
+    }
+    throw new BrandProfileError(
+      400,
+      "INVALID_BRAND_WEBSITE",
+      error instanceof Error ? error.message : "Enter a valid public brand website.",
+    );
+  }
+}
 
 export interface BrandRecord extends QueryResultRow {
   id: string;
@@ -11,6 +84,12 @@ export interface BrandRecord extends QueryResultRow {
   industry: string | null;
   status: "active" | "archived" | "paused";
   lookalike_threshold: number;
+  logo_url?: string | null;
+  website?: string | null;
+  alternate_names?: string[] | null;
+  associated_domains?: string[] | null;
+  keywords?: string[] | null;
+  description?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -55,30 +134,19 @@ export class BrandService {
   }
 
   /**
-   * Normalizes a domain name (strips protocol and trailing paths).
-   */
-  private normalizeDomain(domainInput: string): string {
-    let clean = domainInput.toLowerCase().trim();
-    try {
-      if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
-        clean = `https://${clean}`;
-      }
-      const parsed = new URL(clean);
-      return parsed.hostname;
-    } catch {
-      return domainInput.toLowerCase().trim();
-    }
-  }
-
-  /**
-   * Registers a new brand and automatically enrolls its primary domain into exclusion rules.
+   * Creates a reviewable profile without asserting ownership of its primary domain.
    */
   async createBrand(dto: CreateBrandDTO): Promise<BrandRecord> {
     const slug = this.generateSlug(dto.name);
-    const primaryDomain = this.normalizeDomain(dto.primaryDomain);
+    const primaryDomain = normalizeBrandPrimaryDomain(dto.primaryDomain);
     const threshold = dto.lookalikeThreshold ?? 0.75;
 
-    logger.info("[brands] Registering new official brand", {
+    const associatedDomains = (dto.associatedDomains ?? []).map(normalizeBrandPrimaryDomain);
+    const website = dto.website?.trim()
+      ? normalizeBrandWebsite(dto.website)
+      : `https://${primaryDomain}`;
+
+    logger.info("[brands] Creating unverified brand profile", {
       name: dto.name,
       primaryDomain,
     });
@@ -99,9 +167,9 @@ export class BrandService {
         dto.industry ?? null,
         threshold,
         dto.alternateNames ?? [],
-        dto.associatedDomains ?? [],
+        associatedDomains,
         dto.keywords ?? [],
-        dto.website ?? null,
+        website,
         dto.logoUrl ?? null,
         dto.description ?? null,
       ]);
@@ -110,12 +178,6 @@ export class BrandService {
       if (!brand) {
         throw new Error("Failed to persist brand registration record");
       }
-
-      // Automatically register the primary domain into exclusion whitelist
-      await ExclusionRulesRepository.addRule(
-        primaryDomain,
-        `Official primary domain for ${brand.name}`
-      );
 
       return brand;
     });
@@ -165,15 +227,21 @@ export class BrandService {
 
     const name = dto.name ?? existing.name;
     const primaryDomain = dto.primaryDomain
-      ? this.normalizeDomain(dto.primaryDomain)
+      ? normalizeBrandPrimaryDomain(dto.primaryDomain)
       : existing.primary_domain;
     const industry = dto.industry !== undefined ? dto.industry : existing.industry;
     const status = dto.status ?? existing.status;
     const threshold = dto.lookalikeThreshold ?? existing.lookalike_threshold;
     const alternateNames = dto.alternateNames ?? existing.alternate_names ?? [];
-    const associatedDomains = dto.associatedDomains ?? existing.associated_domains ?? [];
+    const associatedDomains = dto.associatedDomains
+      ? dto.associatedDomains.map(normalizeBrandPrimaryDomain)
+      : existing.associated_domains ?? [];
     const keywords = dto.keywords ?? existing.keywords ?? [];
-    const website = dto.website !== undefined ? dto.website : existing.website;
+    const website = dto.website !== undefined
+      ? dto.website?.trim()
+        ? normalizeBrandWebsite(dto.website)
+        : null
+      : existing.website;
     const logoUrl = dto.logoUrl !== undefined ? dto.logoUrl : existing.logo_url;
     const description = dto.description !== undefined ? dto.description : existing.description;
 
@@ -215,14 +283,6 @@ export class BrandService {
     const updated = res.rows[0];
     if (!updated) {
       throw new Error("Failed to update brand record");
-    }
-
-    // Ensure updated primary domain is also whitelisted
-    if (dto.primaryDomain && dto.primaryDomain !== existing.primary_domain) {
-      await ExclusionRulesRepository.addRule(
-        primaryDomain,
-        `Updated official domain for ${updated.name}`
-      );
     }
 
     return updated;
