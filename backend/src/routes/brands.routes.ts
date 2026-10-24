@@ -8,6 +8,7 @@ import {
 } from "../brands";
 import { BrandAssetsRepository } from "../repositories";
 import { brandGuardService } from "../brand-guard.service";
+import { externalBrandWatchService } from "../external-watch.service";
 import { logger } from "../utils/logger";
 import { logoSimilarityService } from "../logo-similarity.service";
 import { assetService, AssetVerificationError, type AssetType } from "../assets";
@@ -110,6 +111,8 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
           ? (contactEmail ?? contact_email)
           : null,
     });
+
+    externalBrandWatchService.onBrandRegistered(brand.id);
 
     res.status(201).json({
       success: true,

@@ -63,6 +63,11 @@ function getNavigation(t: Translator): NavigationItem[] {
       icon: Radar,
     },
     {
+      id: 'external-watch',
+      label: t('nav.externalWatch'),
+      icon: Globe,
+    },
+    {
       id: 'detections',
       label: t('nav.detections'),
       icon: ListChecks,

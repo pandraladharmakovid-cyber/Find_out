@@ -346,6 +346,35 @@ async function main() {
     check("brand profile displays Brand Guard contact e-mail", false, "navigation item not found");
   }
 
+  // --- External Brand Watch (continuous external impersonation watch) -----
+  const externalWatchTab = Array.from(window.document.querySelectorAll("button")).find((button) =>
+    (button.textContent || "").trim().startsWith("External Watch"),
+  );
+  if (externalWatchTab) {
+    externalWatchTab.click();
+    const watchLoaded = await waitFor(
+      () =>
+        text().includes("Automatic Internet-Wide Brand Impersonation Watch") &&
+        text().includes("Brand Watch Schedules & Scan Controls"),
+    );
+    check(
+      "External Brand Watch dashboard renders",
+      watchLoaded,
+      "header + schedule controls rendered",
+    );
+
+    const schedulesVisible = await waitFor(
+      () => text().includes("PayPal") && text().includes("paypal.com"),
+    );
+    check(
+      "External Brand Watch lists enrolled official brands and seeded external leads",
+      schedulesVisible && text().includes("com.paypa1.secure"),
+      "PayPal schedule + seeded external candidate visible",
+    );
+  } else {
+    check("External Brand Watch dashboard renders", false, "navigation item not found");
+  }
+
   check("no uncaught page errors", pageErrors.length === 0, pageErrors.slice(0, 2).join(" | ") || "clean");
 
   const failed = results.filter((entry) => !entry.ok);

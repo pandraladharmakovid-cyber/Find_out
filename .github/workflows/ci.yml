@@ -47,6 +47,10 @@ jobs:
         working-directory: backend
         run: npm run smoke:brand-guard
 
+      - name: External Brand Watch end-to-end smoke harness
+        working-directory: backend
+        run: npm run smoke:external-watch
+
   frontend:
     name: Frontend — typecheck and production build
     runs-on: ubuntu-latest

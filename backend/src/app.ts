@@ -14,6 +14,7 @@ import {
 
 import brandsRouter from "./routes/brands.routes";
 import brandGuardRouter from "./routes/brand-guard.routes";
+import externalWatchRouter from "./routes/external-watch.routes";
 import agentRouter from "./routes/agent.routes";
 import intelligenceRouter from "./routes/intelligence.routes";
 import monitoringRouter from "./routes/monitoring.routes";
@@ -91,6 +92,7 @@ app.get("/health", async (_req, res, next) => {
 app.use("/api/agent", agentRouter);
 app.use("/api/brands", brandsRouter);
 app.use("/api/brand-guard", brandGuardRouter);
+app.use("/api/external-watch", externalWatchRouter);
 app.use("/api/monitoring", monitoringRouter);
 app.use("/api/investigations", investigationsRouter);
 app.use("/api/detection-records", detectionRecordsRouter);
