@@ -6,14 +6,17 @@ import {
   Globe,
   Loader2,
   LoaderCircle,
+  Mail,
   Plus,
   Search,
   RefreshCw,
+  ShieldAlert,
   ShieldCheck,
   X,
 } from 'lucide-react';
 import { apiRequest, getApiBaseUrl } from './api';
 import { BrandLogo } from './brand-logo';
+import { BrandGuardPopup, type GuardConflict } from './brand-guard-popup';
 import type { Translator } from './i18n';
 
 type OfficialAsset = {
@@ -52,6 +55,20 @@ type Brand = {
   logo_asset_url?: string | null;
   logo_domain?: string | null;
   logo_image_url?: string | null;
+  contact_email?: string | null;
+};
+
+type BrandGuardAlert = {
+  id: string;
+  brand_id: string;
+  suspect_name: string;
+  suspect_domain?: string | null;
+  match_type: string;
+  similarity?: string | number | null;
+  verdict: string;
+  recipient_email: string;
+  status: 'pending' | 'sent' | 'failed' | 'not_configured';
+  created_at: string;
 };
 
 type BrandForm = {
@@ -60,6 +77,24 @@ type BrandForm = {
   domains: string;
   keywords: string;
   alternateNames: string;
+  contactEmail: string;
+};
+
+type BrandCreatePayload = {
+  name: string;
+  website?: string;
+  primaryDomain: string;
+  domains: string[];
+  keywords: string[];
+  alternateNames: string[];
+  contactEmail?: string;
+};
+
+type GuardPopupState = {
+  suspectName: string;
+  suspectDomain: string;
+  conflicts: GuardConflict[];
+  payload: BrandCreatePayload;
 };
 
 type AssetForm = {
@@ -79,6 +114,7 @@ const emptyBrandForm: BrandForm = {
   domains: '',
   keywords: '',
   alternateNames: '',
+  contactEmail: '',
 };
 
 const emptyAssetForm: AssetForm = {
@@ -304,6 +340,10 @@ export const BrandsView: React.FC<{ t: Translator }> = ({ t }) => {
   const [assetForm, setAssetForm] = useState<AssetForm>(emptyAssetForm);
   const [verificationBusy, setVerificationBusy] = useState('');
   const [challenge, setChallenge] = useState<DomainChallenge | null>(null);
+  const [guardPopup, setGuardPopup] = useState<GuardPopupState | null>(null);
+  const [brandAlerts, setBrandAlerts] = useState<BrandGuardAlert[]>([]);
+  const [contactDraft, setContactDraft] = useState('');
+  const [contactSaving, setContactSaving] = useState(false);
   const [logoCheck, setLogoCheck] = useState<{
     loading: boolean;
     error: string;
@@ -371,6 +411,72 @@ export const BrandsView: React.FC<{ t: Translator }> = ({ t }) => {
     void fetchBrands(false);
   }, [fetchBrands]);
 
+  const loadBrandAlerts = useCallback(async (brandId: string | number) => {
+    try {
+      const response = await apiRequest<{ data?: BrandGuardAlert[] }>(
+        `/brand-guard/alerts?brandId=${encodeURIComponent(String(brandId))}&limit=5`,
+      );
+      setBrandAlerts(Array.isArray(response?.data) ? response.data : []);
+    } catch {
+      setBrandAlerts([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    setContactDraft('');
+    setLogoCheck({ loading: false, error: '', result: null });
+    if (selectedBrandId !== null) {
+      void loadBrandAlerts(selectedBrandId);
+    } else {
+      setBrandAlerts([]);
+    }
+  }, [selectedBrandId, loadBrandAlerts]);
+
+  const handleSaveContactEmail = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selectedBrand || !contactDraft.trim()) return;
+    setContactSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      await apiRequest(`/brand-guard/brands/${encodeURIComponent(String(selectedBrand.id))}/contact`, {
+        method: 'POST',
+        body: JSON.stringify({ contactEmail: contactDraft.trim() }),
+      });
+      setContactDraft('');
+      await fetchBrands(true);
+      setNotice('Brand Guard alert contact e-mail saved for this profile.');
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Could not save the Brand Guard alert contact e-mail.',
+      );
+    } finally {
+      setContactSaving(false);
+    }
+  };
+
+  const submitBrandPayload = async (payload: BrandCreatePayload) => {
+    const response = await apiRequest('/brands', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+    const created = getData<Brand>(response);
+
+    setBrandForm(emptyBrandForm);
+    setShowBrandForm(false);
+    setGuardPopup(null);
+    await fetchBrands(false);
+
+    if (created?.id !== undefined) {
+      setSelectedBrandId(created.id);
+    }
+
+    setNotice('Brand profile saved as UNVERIFIED. Add the exact primary domain as an asset and complete proof before treating this profile as official.');
+  };
+
   const handleCreateBrand = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
@@ -390,30 +496,68 @@ export const BrandsView: React.FC<{ t: Translator }> = ({ t }) => {
         throw new Error('Enter the official website or at least one official domain.');
       }
 
-      const response = await apiRequest('/brands', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: brandForm.name.trim(),
-          website: website || undefined,
-          primaryDomain: domains[0] || website,
-          domains,
-          keywords: splitList(brandForm.keywords),
-          alternateNames: splitList(brandForm.alternateNames),
-        }),
-      });
+      const payload: BrandCreatePayload = {
+        name: brandForm.name.trim(),
+        website: website || undefined,
+        primaryDomain: domains[0] || website,
+        domains,
+        keywords: splitList(brandForm.keywords),
+        alternateNames: splitList(brandForm.alternateNames),
+        contactEmail: brandForm.contactEmail.trim() || undefined,
+      };
 
-      const created = getData<Brand>(response);
+      // Brand Guard: before saving, ask the backend whether this submission
+      // collides with an already-registered official brand. A conflict opens
+      // the impersonation pop-up instead of silently registering.
+      try {
+        const guardResponse = await apiRequest<{
+          data?: { conflict?: boolean; conflicts?: GuardConflict[] };
+        }>('/brand-guard/check', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: payload.name,
+            domain: payload.primaryDomain
+              ? new URL(normalizeWebsite(payload.primaryDomain)).hostname.toLowerCase()
+              : undefined,
+          }),
+        });
 
-      setBrandForm(emptyBrandForm);
-      setShowBrandForm(false);
-      await fetchBrands(false);
-
-      if (created?.id !== undefined) {
-        setSelectedBrandId(created.id);
+        const conflicts = guardResponse?.data?.conflicts ?? [];
+        if (guardResponse?.data?.conflict && conflicts.length > 0) {
+          setGuardPopup({
+            suspectName: payload.name,
+            suspectDomain:
+              domains[0] || (website ? new URL(website).hostname.toLowerCase() : ''),
+            conflicts,
+            payload,
+          });
+          setSaving(false);
+          return;
+        }
+      } catch {
+        // The guard check is advisory; registration still goes through the
+        // server, which repeats the same check and records the warning.
       }
 
-      setNotice('Brand profile saved as UNVERIFIED. Add the exact primary domain as an asset and complete proof before treating this profile as official.');
+      await submitBrandPayload(payload);
     } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Unable to create this brand.',
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRegisterAnyway = async () => {
+    if (!guardPopup) return;
+    setSaving(true);
+    setError('');
+    try {
+      await submitBrandPayload(guardPopup.payload);
+      setNotice('Brand profile saved as UNVERIFIED and FLAGGED: it is confusingly similar to a registered official brand. The conflict was recorded server-side.');
+    } catch (err) {
+      setGuardPopup(null);
       setError(
         err instanceof Error ? err.message : 'Unable to create this brand.',
       );
@@ -796,6 +940,101 @@ export const BrandsView: React.FC<{ t: Translator }> = ({ t }) => {
                 )}
               </div>
 
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+                <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                  <div>
+                    <p className="flex items-center gap-2 text-sm font-semibold text-white">
+                      <ShieldAlert className="h-4 w-4 text-rose-400" />
+                      Brand Guard · Impersonation Alerts
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Notifies the official brand via Resend whenever a confusingly similar
+                      profile registration is attempted.
+                    </p>
+                  </div>
+                  {selectedBrand.contact_email ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+                      <Mail className="h-3.5 w-3.5" />
+                      {selectedBrand.contact_email}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-300">
+                      No alert e-mail set
+                    </span>
+                  )}
+                </div>
+
+                {!selectedBrand.contact_email && (
+                  <form
+                    onSubmit={handleSaveContactEmail}
+                    className="mt-3 flex flex-col gap-2 sm:flex-row"
+                  >
+                    <input
+                      type="email"
+                      required
+                      maxLength={320}
+                      value={contactDraft}
+                      onChange={(event) => setContactDraft(event.target.value)}
+                      placeholder="security@officialbrand.com"
+                      className="flex-1 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2 text-xs text-white outline-none transition focus:border-blue-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={contactSaving || !contactDraft.trim()}
+                      className="btn-secondary inline-flex items-center justify-center gap-2 text-xs disabled:opacity-50"
+                    >
+                      {contactSaving ? (
+                        <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Mail className="h-3.5 w-3.5" />
+                      )}
+                      Save alert e-mail
+                    </button>
+                  </form>
+                )}
+
+                {brandAlerts.length > 0 && (
+                  <div className="mt-3 space-y-2 border-t border-slate-800/80 pt-3">
+                    <p className="text-xs font-medium text-slate-400">
+                      Recent impersonation alerts ({brandAlerts.length})
+                    </p>
+                    {brandAlerts.map((alert) => (
+                      <div
+                        key={alert.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs"
+                      >
+                        <div className="min-w-0">
+                          <span className="font-medium text-slate-200">
+                            {alert.suspect_name}
+                          </span>
+                          {alert.suspect_domain && (
+                            <span className="ml-1.5 text-slate-500">
+                              ({alert.suspect_domain})
+                            </span>
+                          )}
+                          {alert.similarity !== null && alert.similarity !== undefined && (
+                            <span className="ml-2 text-slate-400">
+                              {(Number(alert.similarity) * 100).toFixed(1)}% match
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                            alert.status === 'sent'
+                              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                              : alert.status === 'not_configured'
+                                ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                                : 'border-rose-500/30 bg-rose-500/10 text-rose-300'
+                          }`}
+                        >
+                          {alert.status.replace(/_/g, ' ')}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <div className="grid gap-3 py-5 sm:grid-cols-2">
                 <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
                   <p className="text-xs uppercase tracking-wider text-slate-500">
@@ -1067,6 +1306,26 @@ export const BrandsView: React.FC<{ t: Translator }> = ({ t }) => {
                 />
               </label>
 
+              <label className="block space-y-1.5">
+                <span className="text-sm text-slate-300">
+                  Official contact e-mail (impersonation alerts)
+                </span>
+                <input
+                  type="email"
+                  maxLength={320}
+                  value={brandForm.contactEmail}
+                  onChange={(event) =>
+                    setBrandForm({ ...brandForm, contactEmail: event.target.value })
+                  }
+                  placeholder="security@example.com"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-3 text-sm text-white outline-none transition focus:border-blue-500"
+                />
+                <span className="block text-xs text-slate-500">
+                  When somebody tries to register a brand similar to this one, the
+                  impersonation alert is e-mailed to this address.
+                </span>
+              </label>
+
               <div className="flex justify-end gap-2 border-t border-slate-800 pt-4">
                 <button
                   type="button"
@@ -1261,6 +1520,20 @@ export const BrandsView: React.FC<{ t: Translator }> = ({ t }) => {
             </form>
           </section>
         </div>
+      )}
+
+      {guardPopup && (
+        <BrandGuardPopup
+          suspectName={guardPopup.suspectName}
+          suspectDomain={guardPopup.suspectDomain}
+          conflicts={guardPopup.conflicts}
+          registering={saving}
+          onClose={() => {
+            setGuardPopup(null);
+            if (selectedBrandId !== null) void loadBrandAlerts(selectedBrandId);
+          }}
+          onRegisterAnyway={() => void handleRegisterAnyway()}
+        />
       )}
     </section>
   );

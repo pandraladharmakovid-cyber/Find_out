@@ -7,6 +7,7 @@ import {
   normalizeBrandWebsite,
 } from "../brands";
 import { BrandAssetsRepository } from "../repositories";
+import { brandGuardService } from "../brand-guard.service";
 import { logger } from "../utils/logger";
 import { logoSimilarityService } from "../logo-similarity.service";
 import { assetService, AssetVerificationError, type AssetType } from "../assets";
@@ -35,6 +36,8 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
       logoUrl,
       logo_url,
       description,
+      contactEmail,
+      contact_email,
     } = req.body;
 
     const domainList = Array.isArray(domains)
@@ -76,6 +79,21 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
         ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)
         : [];
 
+    // Brand Guard: compare the submission against every registered official
+    // brand before saving, so impersonation attempts are flagged server-side
+    // even when the client-side pop-up check is bypassed.
+    let brandGuard = null;
+    try {
+      brandGuard = await brandGuardService.findConflicts({
+        name: String(name).trim(),
+        domain: normalizedPrimaryDomain,
+      });
+    } catch (guardError) {
+      logger.warn("[brands.routes] Brand Guard pre-registration check failed", {
+        error: guardError instanceof Error ? guardError.message : guardError,
+      });
+    }
+
     const brand = await brandService.createBrand({
       name: String(name).trim(),
       primaryDomain: normalizedPrimaryDomain,
@@ -87,6 +105,10 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
       website: normalizedWebsite,
       logoUrl: logoUrl ?? logo_url ?? null,
       description: description ?? null,
+      contactEmail:
+        typeof (contactEmail ?? contact_email) === "string"
+          ? (contactEmail ?? contact_email)
+          : null,
     });
 
     res.status(201).json({
@@ -96,6 +118,7 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
         official: false,
         verificationStatus: "UNVERIFIED",
         message: "Profile saved for review. Verify its primary domain before treating it as official.",
+        brandGuard,
       },
     });
   } catch (error) {

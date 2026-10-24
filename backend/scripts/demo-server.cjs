@@ -124,6 +124,7 @@ async function seed(run) {
       domain: "paypal.com",
       industry: "payments",
       keywords: ["paypal", "paypal secure"],
+      contactEmail: "brand-protection@paypal.com",
       candidates: [
         {
           platform: "google_play",
@@ -190,10 +191,10 @@ async function seed(run) {
 
   for (const brand of brands) {
     const brandRow = await run(
-      `INSERT INTO brands (name, slug, primary_domain, industry, lookalike_threshold, status, keywords, website)
-       VALUES ($1, $2, $3, $4, 0.75, 'active', $5::text[], $6)
+      `INSERT INTO brands (name, slug, primary_domain, industry, lookalike_threshold, status, keywords, website, contact_email)
+       VALUES ($1, $2, $3, $4, 0.75, 'active', $5::text[], $6, $7)
        RETURNING id`,
-      [brand.name, brand.slug, brand.domain, brand.industry, brand.keywords, `https://${brand.domain}`],
+      [brand.name, brand.slug, brand.domain, brand.industry, brand.keywords, `https://${brand.domain}`, brand.contactEmail ?? null],
     );
     const brandId = brandRow.rows[0].id;
 

@@ -76,6 +76,22 @@ export function normalizeBrandWebsite(websiteInput: string): string {
   }
 }
 
+/**
+ * Validates the optional official contact e-mail used by the Brand Guard
+ * module to deliver impersonation alerts to the registered company.
+ */
+export function normalizeBrandContactEmail(emailInput: string): string {
+  const email = emailInput.trim().toLowerCase();
+  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+    throw new BrandProfileError(
+      400,
+      "INVALID_CONTACT_EMAIL",
+      "Enter a valid contact e-mail address for impersonation alerts.",
+    );
+  }
+  return email;
+}
+
 export interface BrandRecord extends QueryResultRow {
   id: string;
   name: string;
@@ -90,6 +106,7 @@ export interface BrandRecord extends QueryResultRow {
   associated_domains?: string[] | null;
   keywords?: string[] | null;
   description?: string | null;
+  contact_email?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -105,6 +122,7 @@ export interface CreateBrandDTO {
   website?: string | null;
   logoUrl?: string | null;
   description?: string | null;
+  contactEmail?: string | null;
 }
 
 export interface UpdateBrandDTO {
@@ -119,6 +137,7 @@ export interface UpdateBrandDTO {
   website?: string | null;
   logoUrl?: string | null;
   description?: string | null;
+  contactEmail?: string | null;
 }
 
 export class BrandService {
@@ -145,6 +164,9 @@ export class BrandService {
     const website = dto.website?.trim()
       ? normalizeBrandWebsite(dto.website)
       : `https://${primaryDomain}`;
+    const contactEmail = dto.contactEmail?.trim()
+      ? normalizeBrandContactEmail(dto.contactEmail)
+      : null;
 
     logger.info("[brands] Creating unverified brand profile", {
       name: dto.name,
@@ -155,9 +177,10 @@ export class BrandService {
       const text = `
         INSERT INTO brands (
           name, slug, primary_domain, industry, lookalike_threshold, status,
-          alternate_names, associated_domains, keywords, website, logo_url, description
+          alternate_names, associated_domains, keywords, website, logo_url, description,
+          contact_email
         )
-        VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10, $11, $12)
         RETURNING *;
       `;
       const res = await client.query<BrandRecord>(text, [
@@ -172,6 +195,7 @@ export class BrandService {
         website,
         dto.logoUrl ?? null,
         dto.description ?? null,
+        contactEmail,
       ]);
 
       const brand = res.rows[0];
@@ -244,6 +268,11 @@ export class BrandService {
       : existing.website;
     const logoUrl = dto.logoUrl !== undefined ? dto.logoUrl : existing.logo_url;
     const description = dto.description !== undefined ? dto.description : existing.description;
+    const contactEmail = dto.contactEmail !== undefined
+      ? dto.contactEmail?.trim()
+        ? normalizeBrandContactEmail(dto.contactEmail)
+        : null
+      : existing.contact_email ?? null;
 
     const text = `
       UPDATE brands
@@ -259,6 +288,7 @@ export class BrandService {
           website = $11,
           logo_url = $12,
           description = $13,
+          contact_email = $14,
           updated_at = NOW()
       WHERE id = $1
       RETURNING *;
@@ -278,6 +308,7 @@ export class BrandService {
       website,
       logoUrl,
       description,
+      contactEmail,
     ]);
 
     const updated = res.rows[0];

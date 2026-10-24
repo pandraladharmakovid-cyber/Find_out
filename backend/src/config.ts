@@ -102,6 +102,25 @@ const envSchema = z.object({
   COMPLAINT_WEBHOOK_TOKEN: z.string().trim().default(""),
 
   // ---------------------------------------------------------------------
+  // Brand Guard — impersonation alerts delivered through Resend
+  // ---------------------------------------------------------------------
+  // With no key configured the alert endpoint reports "not_configured"
+  // (HTTP 503) instead of pretending an e-mail was sent.
+  RESEND_API_KEY: z.string().trim().default(""),
+  RESEND_API_URL: z.string().trim().default("https://api.resend.com/emails"),
+  // The sender must belong to a domain verified in your Resend account.
+  // "onboarding@resend.dev" works out of the box for testing.
+  RESEND_FROM_EMAIL: z.string().trim().default("onboarding@resend.dev"),
+  RESEND_FROM_NAME: z.string().trim().default("Find_out Brand Guard"),
+  // Similarity (0..1) at which a new registration is flagged as a conflict
+  // with an already-registered official brand.
+  BRAND_GUARD_SIMILARITY_THRESHOLD: z.coerce
+    .number()
+    .min(0.3)
+    .max(1)
+    .default(0.72),
+
+  // ---------------------------------------------------------------------
   // Live cyber threat feed
   // ---------------------------------------------------------------------
   THREAT_FEED_ENABLED: z

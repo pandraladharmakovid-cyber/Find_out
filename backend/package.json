@@ -11,6 +11,7 @@
     "e2e": "node scripts/e2e.cjs",
     "verify": "node scripts/verify.mjs",
     "demo": "node scripts/demo-server.cjs",
+    "smoke:brand-guard": "node scripts/brand-guard-smoke.cjs",
     "smoke:ui": "node ../frontend/scripts/ui-smoke.cjs"
   },
   "dependencies": {
