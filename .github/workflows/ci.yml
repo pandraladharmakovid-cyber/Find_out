@@ -22,11 +22,14 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: backend/package-lock.json
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
 
       - name: Install dependencies
-        working-directory: backend
-        run: npm ci
+        run: |
+          npm ci --prefix backend
+          npm ci --prefix frontend
 
       - name: Type-check and compile
         working-directory: backend
